@@ -1,4 +1,6 @@
 import json
+import threading
+import time
 from collections.abc import Callable
 from datetime import datetime, timedelta
 
@@ -7,6 +9,28 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.models import CardCache
+
+# Scryfall asks for ≥50–100 ms between requests and a descriptive User-Agent.
+_USER_AGENT = "Spellbinder-MTG-Inventory/0.1 (homelab; github.com/spellbinder)"
+_REQUEST_HEADERS = {"User-Agent": _USER_AGENT}
+_MIN_INTERVAL = 0.1  # seconds
+
+
+class _RateLimiter:
+    def __init__(self, interval: float) -> None:
+        self._interval = interval
+        self._lock = threading.Lock()
+        self._last: float = 0.0
+
+    def wait(self) -> None:
+        with self._lock:
+            gap = self._interval - (time.monotonic() - self._last)
+            if gap > 0:
+                time.sleep(gap)
+            self._last = time.monotonic()
+
+
+_limiter = _RateLimiter(_MIN_INTERVAL)
 
 
 def image_uri_normal_from_payload(data: dict) -> str | None:
@@ -21,7 +45,8 @@ class ScryfallClient:
         self.base = settings.scryfall_base.rstrip("/")
 
     def fetch_card_by_id(self, scryfall_id: str) -> dict | None:
-        with httpx.Client(timeout=30.0) as client:
+        _limiter.wait()
+        with httpx.Client(timeout=30.0, headers=_REQUEST_HEADERS) as client:
             r = client.get(f"{self.base}/cards/{scryfall_id}")
             if r.status_code == 404:
                 return None
@@ -30,7 +55,8 @@ class ScryfallClient:
 
     def fetch_named(self, name: str, *, exact: bool = True) -> dict | None:
         param = "exact" if exact else "fuzzy"
-        with httpx.Client(timeout=30.0) as client:
+        _limiter.wait()
+        with httpx.Client(timeout=30.0, headers=_REQUEST_HEADERS) as client:
             r = client.get(f"{self.base}/cards/named", params={param: name})
             if r.status_code == 404:
                 return None
@@ -40,7 +66,8 @@ class ScryfallClient:
     def fetch_cards_collection(self, scryfall_ids: list[str]) -> tuple[list[dict], list[str]]:
         """Fetch up to 75 cards by ID using the /cards/collection bulk endpoint."""
         identifiers = [{"id": sid} for sid in scryfall_ids]
-        with httpx.Client(timeout=30.0) as client:
+        _limiter.wait()
+        with httpx.Client(timeout=30.0, headers=_REQUEST_HEADERS) as client:
             r = client.post(
                 f"{self.base}/cards/collection",
                 json={"identifiers": identifiers},
@@ -54,7 +81,8 @@ class ScryfallClient:
         return found, not_found_ids
 
     def search_cards(self, query: str, *, limit: int = 12) -> list[dict]:
-        with httpx.Client(timeout=30.0) as client:
+        _limiter.wait()
+        with httpx.Client(timeout=30.0, headers=_REQUEST_HEADERS) as client:
             r = client.get(
                 f"{self.base}/cards/search",
                 params={"q": query, "unique": "cards", "order": "name", "dir": "asc"},
