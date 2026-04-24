@@ -1,4 +1,5 @@
 import json
+import random
 import threading
 import time
 from collections.abc import Callable
@@ -13,7 +14,9 @@ from app.models import CardCache
 # Scryfall asks for ≥50–100 ms between requests and a descriptive User-Agent.
 _USER_AGENT = "Spellbinder-MTG-Inventory/0.1 (homelab; github.com/spellbinder)"
 _REQUEST_HEADERS = {"User-Agent": _USER_AGENT}
-_MIN_INTERVAL = 0.1  # seconds
+_MIN_INTERVAL = 0.1  # seconds between requests
+_MAX_RETRIES = 6     # attempts before giving up on a 429
+_BACKOFF_BASE = 2.0  # seconds for first retry; doubles each attempt
 
 
 class _RateLimiter:
@@ -44,36 +47,40 @@ class ScryfallClient:
     def __init__(self):
         self.base = settings.scryfall_base.rstrip("/")
 
+    def _request(self, method: str, url: str, **kwargs) -> httpx.Response:
+        """Rate-limited request with exponential backoff on 429."""
+        for attempt in range(_MAX_RETRIES):
+            _limiter.wait()
+            with httpx.Client(timeout=30.0, headers=_REQUEST_HEADERS) as client:
+                r = client.request(method, url, **kwargs)
+            if r.status_code != 429:
+                return r
+            retry_after = float(r.headers.get("Retry-After", _BACKOFF_BASE * (2 ** attempt)))
+            time.sleep(retry_after + random.uniform(0, 1.0))
+        r.raise_for_status()
+        return r
+
     def fetch_card_by_id(self, scryfall_id: str) -> dict | None:
-        _limiter.wait()
-        with httpx.Client(timeout=30.0, headers=_REQUEST_HEADERS) as client:
-            r = client.get(f"{self.base}/cards/{scryfall_id}")
-            if r.status_code == 404:
-                return None
-            r.raise_for_status()
-            return r.json()
+        r = self._request("GET", f"{self.base}/cards/{scryfall_id}")
+        if r.status_code == 404:
+            return None
+        r.raise_for_status()
+        return r.json()
 
     def fetch_named(self, name: str, *, exact: bool = True) -> dict | None:
         param = "exact" if exact else "fuzzy"
-        _limiter.wait()
-        with httpx.Client(timeout=30.0, headers=_REQUEST_HEADERS) as client:
-            r = client.get(f"{self.base}/cards/named", params={param: name})
-            if r.status_code == 404:
-                return None
-            r.raise_for_status()
-            return r.json()
+        r = self._request("GET", f"{self.base}/cards/named", params={param: name})
+        if r.status_code == 404:
+            return None
+        r.raise_for_status()
+        return r.json()
 
     def fetch_cards_collection(self, scryfall_ids: list[str]) -> tuple[list[dict], list[str]]:
         """Fetch up to 75 cards by ID using the /cards/collection bulk endpoint."""
         identifiers = [{"id": sid} for sid in scryfall_ids]
-        _limiter.wait()
-        with httpx.Client(timeout=30.0, headers=_REQUEST_HEADERS) as client:
-            r = client.post(
-                f"{self.base}/cards/collection",
-                json={"identifiers": identifiers},
-            )
-            r.raise_for_status()
-            data = r.json()
+        r = self._request("POST", f"{self.base}/cards/collection", json={"identifiers": identifiers})
+        r.raise_for_status()
+        data = r.json()
         found = data.get("data") or []
         not_found_ids = [
             item.get("id") for item in (data.get("not_found") or []) if item.get("id")
@@ -81,17 +88,15 @@ class ScryfallClient:
         return found, not_found_ids
 
     def search_cards(self, query: str, *, limit: int = 12) -> list[dict]:
-        _limiter.wait()
-        with httpx.Client(timeout=30.0, headers=_REQUEST_HEADERS) as client:
-            r = client.get(
-                f"{self.base}/cards/search",
-                params={"q": query, "unique": "cards", "order": "name", "dir": "asc"},
-            )
-            if r.status_code == 404:
-                return []
-            r.raise_for_status()
-            data = r.json()
-            return list((data.get("data") or [])[:limit])
+        r = self._request(
+            "GET", f"{self.base}/cards/search",
+            params={"q": query, "unique": "cards", "order": "name", "dir": "asc"},
+        )
+        if r.status_code == 404:
+            return []
+        r.raise_for_status()
+        data = r.json()
+        return list((data.get("data") or [])[:limit])
 
     def upsert_cache_from_scryfall(self, db: Session, data: dict, *, commit: bool = True) -> CardCache:
         sf_id = data.get("id")
