@@ -68,6 +68,8 @@ export type TextImportProgress = {
   done: number;
   total: number;
   total_qty: number;
+  batches_done?: number;
+  batches_total?: number;
 };
 
 export async function fetchInventory(q: string, sort: string): Promise<InventoryLine[]> {
@@ -190,6 +192,18 @@ export async function removeDeckCard(deckId: number, deckCardId: number): Promis
 export async function deleteDeck(id: number): Promise<void> {
   const r = await fetch(`${base}/api/decks/${id}`, { method: "DELETE" });
   if (!r.ok) throw new Error(await r.text());
+}
+
+export type CardDeckMembership = {
+  deck_id: number;
+  deck_name: string;
+  is_commander: boolean;
+};
+
+export async function fetchCardDecks(scryfallId: string): Promise<CardDeckMembership[]> {
+  const r = await fetch(`${base}/api/cards/${encodeURIComponent(scryfallId)}/decks`);
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
 }
 
 export async function fetchCardMatches(scryfallId: string, minScore = 35): Promise<DeckMatch[]> {

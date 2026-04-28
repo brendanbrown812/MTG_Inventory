@@ -433,7 +433,9 @@ export default function DeckDetailPage() {
               {plainBusy && (
                 <p className="mt-1 text-xs text-stone-400">
                   {textProgress
-                    ? `Resolving cards: ${textProgress.done} / ${textProgress.total} unique (${textProgress.total_qty} total)`
+                    ? (textProgress.batches_total != null && textProgress.batches_total > 0 && textProgress.batches_done !== textProgress.batches_total)
+                      ? `Fetching from Scryfall: batch ${textProgress.batches_done ?? 0} / ${textProgress.batches_total}…`
+                      : `Processing: ${textProgress.done} / ${textProgress.total} cards`
                     : "Starting…"}
                 </p>
               )}

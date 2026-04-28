@@ -87,6 +87,18 @@ class ScryfallClient:
         ]
         return found, not_found_ids
 
+    def fetch_cards_collection_by_name(self, names: list[str]) -> tuple[list[dict], list[str]]:
+        """Fetch up to 75 cards by name using the /cards/collection bulk endpoint."""
+        identifiers = [{"name": n} for n in names]
+        r = self._request("POST", f"{self.base}/cards/collection", json={"identifiers": identifiers})
+        r.raise_for_status()
+        data = r.json()
+        found = data.get("data") or []
+        not_found = [
+            item.get("name") for item in (data.get("not_found") or []) if item.get("name")
+        ]
+        return found, not_found
+
     def search_cards(self, query: str, *, limit: int = 12) -> list[dict]:
         r = self._request(
             "GET", f"{self.base}/cards/search",
@@ -213,3 +225,48 @@ def bulk_ensure_cards_cached(
     db.commit()
 
     return cache_map
+
+
+def bulk_ensure_cards_cached_by_name(
+    db: Session,
+    names: list[str],
+    progress_callback: Callable[[int, int], None] | None = None,
+) -> dict[str, CardCache]:
+    """
+    Resolve card names → CardCache rows using /cards/collection name identifiers
+    (75 per request). Returns {name.lower(): CardCache}. Names Scryfall doesn't
+    recognise are silently omitted; callers should fall back to individual lookup.
+    """
+    if not names:
+        return {}
+
+    unique_names = list(dict.fromkeys(n.strip() for n in names if n.strip()))
+    cutoff = datetime.utcnow() - timedelta(days=14)
+
+    fresh_rows = (
+        db.query(CardCache)
+        .filter(CardCache.name.in_(unique_names), CardCache.updated_at >= cutoff)
+        .all()
+    )
+    name_map: dict[str, CardCache] = {r.name.lower(): r for r in fresh_rows}
+
+    to_fetch = [n for n in unique_names if n.lower() not in name_map]
+    if not to_fetch:
+        return name_map
+
+    client = ScryfallClient()
+    batch_size = 75
+    total_batches = (len(to_fetch) + batch_size - 1) // batch_size
+    if progress_callback:
+        progress_callback(0, total_batches)
+    for i in range(0, len(to_fetch), batch_size):
+        batch = to_fetch[i : i + batch_size]
+        found, _ = client.fetch_cards_collection_by_name(batch)
+        for data in found:
+            row = client.upsert_cache_from_scryfall(db, data, commit=False)
+            name_map[row.name.lower()] = row
+        if progress_callback:
+            progress_callback(i // batch_size + 1, total_batches)
+    db.commit()
+
+    return name_map

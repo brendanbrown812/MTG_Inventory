@@ -1,6 +1,7 @@
 import csv
 import io
 import re
+import time
 from typing import Annotated
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, UploadFile
@@ -30,6 +31,7 @@ from app.services.matcher import match_new_cards
 from app.services.scryfall_client import (
     ScryfallClient,
     bulk_ensure_cards_cached,
+    bulk_ensure_cards_cached_by_name,
     ensure_card_cached,
     image_uri_normal_from_payload,
 )
@@ -160,7 +162,23 @@ def _apply_deck_csv_rows(
         _norm_str({k.strip().lower(): v for k, v in row.items() if k}.get("scryfall id"))
         for row in rows
     ]
-    bulk_ensure_cards_cached(db, [sid for sid in ids if sid])
+    valid_ids = [sid for sid in ids if sid]
+    cache_map = bulk_ensure_cards_cached(db, valid_ids)
+
+    # Preload existing deck cards and inventory lines for in-memory merge.
+    existing_dc: dict[tuple, DeckCard] = {
+        (dc.scryfall_id, dc.is_commander, dc.is_sideboard): dc
+        for dc in db.query(DeckCard).filter(DeckCard.deck_id == deck.id).all()
+    }
+    inv_map: dict[tuple, InventoryLine] = {}
+    if add_to_collection and valid_ids:
+        inv_map = {
+            (il.scryfall_id, il.foil, il.condition, il.language): il
+            for il in db.query(InventoryLine)
+            .filter(InventoryLine.scryfall_id.in_(valid_ids))
+            .all()
+        }
+
     for idx, row in enumerate(rows):
         key_map = {k.strip().lower(): v for k, v in row.items() if k}
         sf = _norm_str(key_map.get("scryfall id"))
@@ -174,24 +192,47 @@ def _apply_deck_csv_rows(
         if qty <= 0:
             errors.append(DeckCsvRowError(row_index=idx, error="Invalid quantity"))
             continue
-        card = db.get(CardCache, sf)
-        if not card:
+        if not cache_map.get(sf):
             errors.append(DeckCsvRowError(row_index=idx, error="Unknown Scryfall ID"))
             continue
-        _merge_deck_card(db, deck.id, sf, qty, is_commander=False, is_sideboard=False)
+
+        dc_key = (sf, False, False)
+        if dc_key in existing_dc:
+            existing_dc[dc_key].quantity += qty
+        else:
+            dc = DeckCard(deck_id=deck.id, scryfall_id=sf, quantity=qty, is_commander=False, is_sideboard=False)
+            db.add(dc)
+            existing_dc[dc_key] = dc
+
         if add_to_collection:
-            _merge_inventory_default(db, sf, qty)
+            inv_key = (sf, False, None, "en")
+            if inv_key in inv_map:
+                inv_map[inv_key].quantity += qty
+            else:
+                il = InventoryLine(scryfall_id=sf, quantity=qty, foil=False, condition=None, language="en")
+                db.add(il)
+                inv_map[inv_key] = il
+
     return errors
 
 
 _QTY_NAME_LINE = re.compile(r"^(\d+)\s+(.+)$")
+# Matches Moxfield/Archidekt export suffix: "Card Name (SET) collector_number [*F*]"
+_SET_COLLECTOR_SUFFIX = re.compile(
+    r"^(.*?)\s+\([A-Z0-9]{2,6}\)\s+[A-Z0-9][A-Z0-9\-]*p?\s*(?:\*F\*\s*)?$",
+    re.IGNORECASE,
+)
 
 
 def _parse_qty_name_line(line: str) -> tuple[int, str] | None:
     m = _QTY_NAME_LINE.match(line.strip())
     if not m:
         return None
-    return int(m.group(1)), m.group(2).strip()
+    qty = int(m.group(1))
+    raw_name = m.group(2).strip()
+    sm = _SET_COLLECTOR_SUFFIX.match(raw_name)
+    name = sm.group(1).strip() if sm else raw_name
+    return qty, name
 
 
 def _resolve_card_name_to_id(db: Session, name: str) -> str | None:
@@ -250,9 +291,62 @@ def _apply_deck_plaintext(
 
     total = len(card_lines)
     total_qty = sum(q for _, q, _, _ in card_lines if q is not None)
+
+    # Bulk-resolve all card names: ceil(N/75) Scryfall requests instead of N sequential calls.
+    names_to_resolve = [name for _, qty, name, _ in card_lines if qty is not None]
+
+    def _on_batch(done: int, total_batches: int) -> None:
+        if progress_key is not None:
+            _text_import_progress[progress_key] = {
+                "done": 0,
+                "total": total,
+                "total_qty": total_qty,
+                "batches_done": done,
+                "batches_total": total_batches,
+            }
+
+    if progress_key is not None:
+        _text_import_progress[progress_key] = {
+            "done": 0, "total": total, "total_qty": total_qty,
+            "batches_done": 0, "batches_total": 0,
+        }
+
+    _t0 = time.monotonic()
+    name_map = bulk_ensure_cards_cached_by_name(
+        db, names_to_resolve,
+        progress_callback=_on_batch if progress_key is not None else None,
+    )
+    _log.info(
+        "plaintext import bulk-name-fetch: %.2fs  names=%d  resolved=%d  misses=%d",
+        time.monotonic() - _t0,
+        len(names_to_resolve),
+        len(name_map),
+        len(names_to_resolve) - len(name_map),
+    )
+
+    # Preload existing deck cards for in-memory merge.
+    existing_dc: dict[tuple, DeckCard] = {
+        (dc.scryfall_id, dc.is_commander, dc.is_sideboard): dc
+        for dc in db.query(DeckCard).filter(DeckCard.deck_id == deck.id).all()
+    }
+
+    # Preload inventory lines for all already-resolved IDs.
+    resolved_ids = {row.scryfall_id for row in name_map.values()}
+    inv_map: dict[tuple, InventoryLine] = {}
+    if add_to_collection and resolved_ids:
+        inv_map = {
+            (il.scryfall_id, il.foil, il.condition, il.language): il
+            for il in db.query(InventoryLine)
+            .filter(InventoryLine.scryfall_id.in_(list(resolved_ids)))
+            .all()
+        }
+
+    # Switch progress to the per-card loop phase.
     if progress_key is not None:
         _text_import_progress[progress_key] = {"done": 0, "total": total, "total_qty": total_qty}
 
+    _t1 = time.monotonic()
+    fallback_count = 0
     errors: list[DeckCsvRowError] = []
     for idx, (line_idx, qty, name_or_raw, is_commander) in enumerate(card_lines):
         if qty is None:
@@ -263,17 +357,54 @@ def _apply_deck_plaintext(
                 )
             )
         else:
-            sf = _resolve_card_name_to_id(db, name_or_raw)
-            if not sf:
+            card = name_map.get(name_or_raw.lower())
+            if card is None:
+                # Bulk lookup missed (e.g. fuzzy name mismatch) — fall back to individual lookup.
+                fallback_count += 1
+                _log.debug("plaintext import fallback lookup: %r", name_or_raw)
+                sf = _resolve_card_name_to_id(db, name_or_raw)
+                if sf:
+                    card = db.get(CardCache, sf)
+                    if card:
+                        name_map[name_or_raw.lower()] = card  # cache for any duplicates
+
+            if card is None:
                 errors.append(DeckCsvRowError(row_index=line_idx, error=f"Card not found: {name_or_raw[:80]}"))
             else:
-                _merge_deck_card(db, deck.id, sf, qty, is_commander=is_commander, is_sideboard=False)
+                sf = card.scryfall_id
+                dc_key = (sf, is_commander, False)
+                if dc_key in existing_dc:
+                    existing_dc[dc_key].quantity += qty
+                else:
+                    dc = DeckCard(
+                        deck_id=deck.id, scryfall_id=sf, quantity=qty,
+                        is_commander=is_commander, is_sideboard=False,
+                    )
+                    db.add(dc)
+                    existing_dc[dc_key] = dc
+
                 if is_commander and deck.commander_scryfall_id is None:
                     deck.commander_scryfall_id = sf
+
                 if add_to_collection:
-                    _merge_inventory_default(db, sf, qty)
+                    inv_key = (sf, False, None, "en")
+                    if inv_key in inv_map:
+                        inv_map[inv_key].quantity += qty
+                    else:
+                        il = InventoryLine(scryfall_id=sf, quantity=qty, foil=False, condition=None, language="en")
+                        db.add(il)
+                        inv_map[inv_key] = il
+
         if progress_key is not None:
             _text_import_progress[progress_key]["done"] = idx + 1
+
+    _log.info(
+        "plaintext import loop: %.2fs  cards=%d  fallbacks=%d  errors=%d",
+        time.monotonic() - _t1,
+        total,
+        fallback_count,
+        len(errors),
+    )
     return errors
 
 
@@ -568,6 +699,21 @@ def resolve_card(
             )
         )
     return CardResolveOut(matches=matches)
+
+
+@app.get("/api/cards/{scryfall_id}/decks")
+def card_in_decks(scryfall_id: str, db: Annotated[Session, Depends(get_db)]):
+    """Return the decks that actually contain this card."""
+    rows = (
+        db.query(DeckCard)
+        .filter(DeckCard.scryfall_id == scryfall_id)
+        .options(joinedload(DeckCard.deck))
+        .all()
+    )
+    return [
+        {"deck_id": dc.deck_id, "deck_name": dc.deck.name, "is_commander": dc.is_commander}
+        for dc in rows
+    ]
 
 
 @app.get("/api/cards/{scryfall_id}/matches")
