@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import sys
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -23,8 +24,9 @@ def configure_logging() -> logging.Logger:
     fmt = logging.Formatter("%(asctime)s %(levelname)s [%(name)s] %(message)s")
 
     backend_dir = Path(__file__).resolve().parent.parent
-    log_dir = backend_dir / "logs"
-    log_dir.mkdir(exist_ok=True)
+    configured_log_dir = os.getenv("SPELLBINDER_LOG_DIR")
+    log_dir = Path(configured_log_dir) if configured_log_dir else backend_dir / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / "spellbinder.log"
 
     fh = RotatingFileHandler(

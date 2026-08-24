@@ -1,9 +1,11 @@
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class CardOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     scryfall_id: str
     oracle_id: str
     name: str
@@ -15,11 +17,9 @@ class CardOut(BaseModel):
     rarity: str | None
     image_uri_normal: str | None
 
-    class Config:
-        from_attributes = True
-
-
 class InventoryLineOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id: int
     scryfall_id: str
     quantity: int
@@ -30,35 +30,33 @@ class InventoryLineOut(BaseModel):
     collector_number: str | None
     card: CardOut | None
 
-    class Config:
-        from_attributes = True
-
-
 class DeckCardIn(BaseModel):
-    scryfall_id: str
-    quantity: int = 1
+    scryfall_id: str = Field(min_length=36, max_length=36)
+    quantity: int = Field(default=1, ge=1, le=999)
     is_commander: bool = False
     is_sideboard: bool = False
 
 
 class DeckCreate(BaseModel):
-    name: str
-    format: str = "commander"
-    status: str = "building"
-    notes: str | None = None
-    commander_scryfall_id: str | None = None
-    cards: list[DeckCardIn] = Field(default_factory=list)
+    name: str = Field(min_length=1, max_length=200)
+    format: str = Field(default="commander", min_length=1, max_length=40)
+    status: str = Field(default="building", min_length=1, max_length=20)
+    notes: str | None = Field(default=None, max_length=50_000)
+    commander_scryfall_id: str | None = Field(default=None, min_length=36, max_length=36)
+    cards: list[DeckCardIn] = Field(default_factory=list, max_length=1_000)
 
 
 class DeckUpdate(BaseModel):
-    name: str | None = None
-    format: str | None = None
-    status: str | None = None
-    notes: str | None = None
-    commander_scryfall_id: str | None = None
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    format: str | None = Field(default=None, min_length=1, max_length=40)
+    status: str | None = Field(default=None, min_length=1, max_length=20)
+    notes: str | None = Field(default=None, max_length=50_000)
+    commander_scryfall_id: str | None = Field(default=None, min_length=36, max_length=36)
 
 
 class DeckOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id: int
     name: str
     format: str
@@ -66,25 +64,19 @@ class DeckOut(BaseModel):
     notes: str | None
     commander_scryfall_id: str | None
 
-    class Config:
-        from_attributes = True
-
-
 class DeckDetailOut(DeckOut):
     cards: list["DeckCardOut"] = Field(default_factory=list)
 
 
 class DeckCardOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id: int
     scryfall_id: str
     quantity: int
     is_commander: bool
     is_sideboard: bool
     card: CardOut | None
-
-    class Config:
-        from_attributes = True
-
 
 DeckDetailOut.model_rebuild()
 

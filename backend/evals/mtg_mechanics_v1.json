@@ -1,0 +1,168 @@
+{
+  "suite_version": "1.0.0",
+  "profile_schema_version": "1.0.0",
+  "taxonomy_version": "2026.1",
+  "profiles": {
+    "sol_ring": {
+      "schema_version": "1.0.0",
+      "taxonomy_version": "2026.1",
+      "oracle_id": "eval-sol-ring",
+      "card_name": "Sol Ring",
+      "roles": ["mana_acceleration"],
+      "hooks": [
+        {"verb": "produces", "mechanic": "mana", "scope": "self", "condition": "tap", "evidence": "{T}: Add {C}{C}."}
+      ],
+      "universal_utility": {"tier": "broad", "reasons": ["mana_acceleration"]},
+      "confidence": 1.0
+    },
+    "bow_of_nylea": {
+      "schema_version": "1.0.0",
+      "taxonomy_version": "2026.1",
+      "oracle_id": "eval-bow",
+      "card_name": "Bow of Nylea",
+      "roles": ["combat_enabler", "graveyard_recycling"],
+      "hooks": [
+        {"verb": "grants", "mechanic": "deathtouch", "scope": "attacking_creatures", "condition": "while_attacking", "evidence": "Attacking creatures you control have deathtouch."},
+        {"verb": "produces", "mechanic": "life_gain", "scope": "self", "condition": "activated_ability", "evidence": "You gain 3 life."},
+        {"verb": "enables", "mechanic": "graveyard_recycling", "scope": "your_graveyard", "condition": "activated_ability", "evidence": "Put up to four target cards from your graveyard on the bottom of your library in any order."}
+      ],
+      "universal_utility": {"tier": "contextual", "reasons": ["combat_enabler"]},
+      "confidence": 0.98
+    },
+    "fynn": {
+      "schema_version": "1.0.0",
+      "taxonomy_version": "2026.1",
+      "oracle_id": "eval-fynn",
+      "card_name": "Fynn, the Fangbearer",
+      "roles": ["poison_payoff"],
+      "hooks": [
+        {"verb": "rewards", "mechanic": "deathtouch", "scope": "controlled_creatures", "condition": "combat_damage_to_player", "evidence": "Whenever a creature you control with deathtouch deals combat damage to a player, that player gets two poison counters."},
+        {"verb": "produces", "mechanic": "poison_counters", "scope": "opponents", "condition": "deathtouch_combat_damage", "evidence": "that player gets two poison counters"}
+      ],
+      "universal_utility": {"tier": "none", "reasons": []},
+      "confidence": 1.0
+    },
+    "rest_in_peace": {
+      "schema_version": "1.0.0",
+      "taxonomy_version": "2026.1",
+      "oracle_id": "eval-rest-in-peace",
+      "card_name": "Rest in Peace",
+      "roles": ["graveyard_hate", "stax"],
+      "hooks": [
+        {"verb": "prevents", "mechanic": "graveyard", "scope": "all_graveyards", "condition": "replacement_effect", "evidence": "If a card or token would be put into a graveyard from anywhere, exile it instead."}
+      ],
+      "universal_utility": {"tier": "contextual", "reasons": ["graveyard_hate"]},
+      "confidence": 1.0
+    },
+    "muldrotha": {
+      "schema_version": "1.0.0",
+      "taxonomy_version": "2026.1",
+      "oracle_id": "eval-muldrotha",
+      "card_name": "Muldrotha, the Gravetide",
+      "roles": ["recursion", "card_advantage"],
+      "hooks": [
+        {"verb": "consumes", "mechanic": "graveyard", "scope": "your_graveyard", "condition": "cast_or_play_permanent", "evidence": "you may play a land and cast a permanent spell of each permanent type from your graveyard"},
+        {"verb": "enables", "mechanic": "cast_from_graveyard", "scope": "your_graveyard", "condition": "once_each_permanent_type_each_turn", "evidence": "cast a permanent spell of each permanent type from your graveyard"}
+      ],
+      "universal_utility": {"tier": "none", "reasons": []},
+      "confidence": 1.0
+    },
+    "torpor_orb": {
+      "schema_version": "1.0.0",
+      "taxonomy_version": "2026.1",
+      "oracle_id": "eval-torpor-orb",
+      "card_name": "Torpor Orb",
+      "roles": ["stax"],
+      "hooks": [
+        {"verb": "prevents", "mechanic": "enter_battlefield_triggers", "scope": "all_creatures", "condition": "static_ability", "evidence": "Creatures entering don't cause abilities to trigger."}
+      ],
+      "universal_utility": {"tier": "contextual", "reasons": ["stax"]},
+      "confidence": 1.0
+    },
+    "panharmonicon": {
+      "schema_version": "1.0.0",
+      "taxonomy_version": "2026.1",
+      "oracle_id": "eval-panharmonicon",
+      "card_name": "Panharmonicon",
+      "roles": ["trigger_multiplier"],
+      "hooks": [
+        {"verb": "amplifies", "mechanic": "enter_battlefield_triggers", "scope": "controlled_permanents", "condition": "artifact_or_creature_entering", "evidence": "that ability triggers an additional time"}
+      ],
+      "universal_utility": {"tier": "none", "reasons": []},
+      "confidence": 1.0
+    },
+    "basilisk_collar": {
+      "schema_version": "1.0.0",
+      "taxonomy_version": "2026.1",
+      "oracle_id": "eval-collar",
+      "card_name": "Basilisk Collar",
+      "roles": ["combat_enabler"],
+      "hooks": [
+        {"verb": "grants", "mechanic": "deathtouch", "scope": "equipped_creature", "condition": "equipped", "evidence": "Equipped creature has deathtouch and lifelink."},
+        {"verb": "grants", "mechanic": "lifelink", "scope": "equipped_creature", "condition": "equipped", "evidence": "Equipped creature has deathtouch and lifelink."}
+      ],
+      "universal_utility": {"tier": "contextual", "reasons": ["combat_enabler"]},
+      "confidence": 1.0
+    },
+    "goblin_sharpshooter": {
+      "schema_version": "1.0.0",
+      "taxonomy_version": "2026.1",
+      "oracle_id": "eval-sharpshooter",
+      "card_name": "Goblin Sharpshooter",
+      "roles": ["direct_damage", "combo_enabler"],
+      "hooks": [
+        {"verb": "produces", "mechanic": "direct_damage", "scope": "any_target", "condition": "tap", "evidence": "Goblin Sharpshooter deals 1 damage to any target."},
+        {"verb": "enables", "mechanic": "untap", "scope": "self", "condition": "creature_dies", "evidence": "Whenever a creature dies, untap Goblin Sharpshooter."}
+      ],
+      "universal_utility": {"tier": "none", "reasons": []},
+      "confidence": 1.0
+    },
+    "pitiless_plunderer": {
+      "schema_version": "1.0.0",
+      "taxonomy_version": "2026.1",
+      "oracle_id": "eval-plunderer",
+      "card_name": "Pitiless Plunderer",
+      "roles": ["token_generator", "mana_acceleration", "combo_enabler"],
+      "hooks": [
+        {"verb": "rewards", "mechanic": "creature_death", "scope": "other_controlled_creatures", "condition": "dies", "evidence": "Whenever another creature you control dies, create a Treasure token."},
+        {"verb": "produces", "mechanic": "treasure_tokens", "scope": "self", "condition": "other_controlled_creature_dies", "evidence": "create a Treasure token"}
+      ],
+      "universal_utility": {"tier": "contextual", "reasons": ["mana_acceleration"]},
+      "confidence": 1.0
+    },
+    "chatterfang": {
+      "schema_version": "1.0.0",
+      "taxonomy_version": "2026.1",
+      "oracle_id": "eval-chatterfang",
+      "card_name": "Chatterfang, Squirrel General",
+      "roles": ["token_multiplier", "sacrifice_outlet", "removal", "combo_enabler"],
+      "hooks": [
+        {"verb": "amplifies", "mechanic": "token_creation", "scope": "your_tokens", "condition": "replacement_effect", "evidence": "those tokens plus that many 1/1 green Squirrel creature tokens are created instead"},
+        {"verb": "consumes", "mechanic": "creature_tokens", "scope": "controlled_squirrels", "condition": "activated_ability", "evidence": "Sacrifice X Squirrels"},
+        {"verb": "produces", "mechanic": "creature_death", "scope": "controlled_squirrels", "condition": "sacrifice_cost", "evidence": "Sacrifice X Squirrels"}
+      ],
+      "universal_utility": {"tier": "none", "reasons": []},
+      "confidence": 1.0
+    }
+  },
+  "profile_expectations": [
+    {"id": "indirect-deathtouch-grant", "category": "indirect_synergy", "profile": "bow_of_nylea", "required_roles": ["combat_enabler"], "required_hooks": [{"verb": "grants", "mechanic": "deathtouch", "scope": "attacking_creatures"}]},
+    {"id": "universal-sol-ring", "category": "universal_card", "profile": "sol_ring", "required_roles": ["mana_acceleration"], "universal_tier": "broad"},
+    {"id": "graveyard-shutdown", "category": "anti_synergy", "profile": "rest_in_peace", "required_hooks": [{"verb": "prevents", "mechanic": "graveyard", "scope": "all_graveyards"}]},
+    {"id": "etb-shutdown", "category": "anti_synergy", "profile": "torpor_orb", "required_hooks": [{"verb": "prevents", "mechanic": "enter_battlefield_triggers", "scope": "all_creatures"}]},
+    {"id": "death-to-treasure", "category": "known_interaction", "profile": "pitiless_plunderer", "required_hooks": [{"verb": "rewards", "mechanic": "creature_death"}, {"verb": "produces", "mechanic": "treasure_tokens"}]}
+  ],
+  "interaction_expectations": [
+    {"id": "fynn-bow", "category": "indirect_synergy", "left": "fynn", "right": "bow_of_nylea", "expected": "synergy", "mechanics": ["deathtouch"]},
+    {"id": "sol-ring-any-deck", "category": "universal_card", "left": "sol_ring", "right": "fynn", "expected": "universal_fit", "mechanics": ["mana"]},
+    {"id": "rip-muldrotha", "category": "anti_synergy", "left": "rest_in_peace", "right": "muldrotha", "expected": "anti_synergy", "mechanics": ["graveyard"]},
+    {"id": "torpor-panharmonicon", "category": "anti_synergy", "left": "torpor_orb", "right": "panharmonicon", "expected": "anti_synergy", "mechanics": ["enter_battlefield_triggers"]},
+    {"id": "collar-sharpshooter", "category": "known_interaction", "left": "basilisk_collar", "right": "goblin_sharpshooter", "expected": "synergy", "mechanics": ["deathtouch", "direct_damage"]},
+    {"id": "chatterfang-plunderer", "category": "known_interaction", "left": "chatterfang", "right": "pitiless_plunderer", "expected": "conditional_combo", "mechanics": ["creature_death", "treasure_tokens", "token_creation"]}
+  ],
+  "legality_expectations": [
+    {"id": "hybrid-is-and", "category": "legality_trap", "card_name": "Kitchen Finks", "card_color_identity": ["G", "W"], "commander_color_identity": ["W"], "legal": false},
+    {"id": "extort-reminder-ignored", "category": "legality_trap", "card_name": "Blind Obedience", "card_color_identity": ["W"], "commander_color_identity": ["W"], "legal": true},
+    {"id": "colorless-universal", "category": "legality_trap", "card_name": "Sol Ring", "card_color_identity": [], "commander_color_identity": ["B"], "legal": true}
+  ]
+}

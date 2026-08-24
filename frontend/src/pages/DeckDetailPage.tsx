@@ -4,6 +4,7 @@ import {
   addDeckCards,
   deleteDeck,
   fetchDeck,
+  fetchDeckAnalysis,
   fetchTextImportProgress,
   importDeckCsvAppend,
   importDeckTextAppend,
@@ -12,6 +13,7 @@ import {
   resolveCard,
   type CardMatch,
   type DeckCard,
+  type DeckAnalysis,
   type DeckDetail,
   type TextImportProgress,
 } from "../api";
@@ -21,10 +23,89 @@ import { CONSTRUCTED_FORMATS, formatOptionLabel } from "../lib/formats";
 const SCRYFALL_UUID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
+function AnalysisPanel({ analysis, loading }: { analysis: DeckAnalysis | null; loading: boolean }) {
+  if (!analysis) {
+    return loading ? (
+      <div className="rounded-2xl border border-white/10 bg-ink-900/40 p-5 text-sm text-stone-500">
+        Running deterministic deck checks…
+      </div>
+    ) : null;
+  }
+
+  const findings = [...analysis.legality.findings, ...analysis.health.findings];
+  const roleLabel = (value: string) => value.replaceAll("_", " ");
+
+  return (
+    <section className="rounded-2xl border border-white/10 bg-ink-900/40 p-5">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h2 className="text-sm font-medium uppercase tracking-wider text-stone-500">Deterministic deck analysis</h2>
+          <p className="mt-1 text-xs text-stone-600">Commander rules, owned quantities, and deck-health heuristics. No AI model.</p>
+        </div>
+        {loading ? <span className="text-xs text-stone-500">Refreshing…</span> : null}
+      </div>
+
+      <div className="mt-4 grid gap-3 sm:grid-cols-3 lg:grid-cols-6">
+        {[
+          ["Legality", analysis.legal ? "Legal" : "Illegal", analysis.legal],
+          ["Availability", analysis.available ? "Owned" : `${analysis.availability.total_shortfall} short`, analysis.available],
+          ["Deck size", `${analysis.deck_size.actual} / 100`, analysis.deck_size.actual === 100],
+          ["Lands", `${analysis.health.lands.count}`, analysis.health.lands.count >= analysis.health.lands.target_min],
+          ["Mana sources", `${analysis.health.mana_sources.total}`, analysis.health.mana_sources.total >= analysis.health.mana_sources.target_min],
+          ["Average MV", `${analysis.health.curve.average_mana_value}`, analysis.health.curve.average_mana_value <= 4],
+        ].map(([label, value, good]) => (
+          <div key={String(label)} className="rounded-xl border border-white/5 bg-ink-950/45 px-3 py-2">
+            <div className="text-[10px] uppercase tracking-wider text-stone-600">{label}</div>
+            <div className={`mt-1 text-sm font-semibold ${good ? "text-emerald-300" : "text-amber-300"}`}>{value}</div>
+          </div>
+        ))}
+      </div>
+
+      <div className="mt-4 grid gap-4 lg:grid-cols-2">
+        <div>
+          <h3 className="text-xs font-medium uppercase tracking-wider text-stone-500">Functional roles</h3>
+          <div className="mt-2 grid grid-cols-2 gap-1.5 sm:grid-cols-3">
+            {Object.entries(analysis.health.roles).map(([role, data]) => (
+              <div key={role} className="flex justify-between rounded-lg bg-ink-950/45 px-2.5 py-1.5 text-xs">
+                <span className="capitalize text-stone-400">{roleLabel(role)}</span>
+                <span className={data.status === "low" ? "text-amber-300" : "text-stone-200"}>
+                  {data.count} <span className="text-stone-600">/ {data.target_min}+</span>
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div>
+          <h3 className="text-xs font-medium uppercase tracking-wider text-stone-500">Findings</h3>
+          {findings.length === 0 && analysis.availability.missing.length === 0 ? (
+            <p className="mt-2 text-xs text-emerald-300">No legality, availability, or health issues detected.</p>
+          ) : (
+            <ul className="mt-2 max-h-40 space-y-1 overflow-y-auto text-xs">
+              {analysis.availability.missing.map((row) => (
+                <li key={row.oracle_id} className="text-red-300">
+                  Missing {row.shortfall}× {row.name} ({row.owned} owned, {row.required} required)
+                </li>
+              ))}
+              {findings.map((finding, index) => (
+                <li key={`${finding.code}-${index}`} className={finding.severity === "error" ? "text-red-300" : "text-amber-300"}>
+                  {finding.message}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      </div>
+    </section>
+  );
+}
+
 export default function DeckDetailPage() {
   const { id } = useParams();
   const deckId = Number(id);
   const [deck, setDeck] = useState<DeckDetail | null>(null);
+  const [analysis, setAnalysis] = useState<DeckAnalysis | null>(null);
+  const [analysisLoading, setAnalysisLoading] = useState(false);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
   const [addQuery, setAddQuery] = useState("");
@@ -41,6 +122,21 @@ export default function DeckDetailPage() {
   const [plainBusy, setPlainBusy] = useState(false);
   const [textProgress, setTextProgress] = useState<TextImportProgress | null>(null);
 
+  const refreshAnalysis = useCallback(async (format: string) => {
+    if (!Number.isFinite(deckId) || !["commander", "edh"].includes(format.toLowerCase())) {
+      setAnalysis(null);
+      return;
+    }
+    setAnalysisLoading(true);
+    try {
+      setAnalysis(await fetchDeckAnalysis(deckId));
+    } catch {
+      setAnalysis(null);
+    } finally {
+      setAnalysisLoading(false);
+    }
+  }, [deckId]);
+
   const load = useCallback(async () => {
     if (!Number.isFinite(deckId)) return;
     setLoading(true);
@@ -49,13 +145,14 @@ export default function DeckDetailPage() {
       const d = await fetchDeck(deckId);
       setDeck(d);
       setCommanderId(d.commander_scryfall_id ?? "");
+      void refreshAnalysis(d.format);
     } catch (e) {
       setErr(e instanceof Error ? e.message : "Failed to load deck");
       setDeck(null);
     } finally {
       setLoading(false);
     }
-  }, [deckId]);
+  }, [deckId, refreshAnalysis]);
 
   useEffect(() => {
     void load();
@@ -72,6 +169,7 @@ export default function DeckDetailPage() {
         commander_scryfall_id: commanderId.trim() || null,
       });
       setDeck(d);
+      void refreshAnalysis(d.format);
     } catch (e) {
       setErr(e instanceof Error ? e.message : "Save failed");
     } finally {
@@ -88,6 +186,7 @@ export default function DeckDetailPage() {
         { scryfall_id: scryfallId, quantity: 1, is_commander: addAsCommander },
       ]);
       setDeck(d);
+      void refreshAnalysis(d.format);
       setAddQuery("");
       setAddAsCommander(false);
       setPickList(null);
@@ -137,6 +236,7 @@ export default function DeckDetailPage() {
     try {
       const { deck: updated, row_errors } = await importDeckCsvAppend(deck.id, csvFile, csvAddCollection);
       setDeck(updated);
+      void refreshAnalysis(updated.format);
       setCsvFile(null);
       if (row_errors.length > 0) {
         const er = row_errors[0];
@@ -167,6 +267,7 @@ export default function DeckDetailPage() {
     try {
       const { deck: updated, row_errors } = await importDeckTextAppend(deck.id, plainText, csvAddCollection);
       setDeck(updated);
+      void refreshAnalysis(updated.format);
       setPlainText("");
       if (row_errors.length > 0) {
         const er = row_errors[0];
@@ -187,6 +288,7 @@ export default function DeckDetailPage() {
     try {
       const d = await removeDeckCard(deck.id, dc.id);
       setDeck(d);
+      void refreshAnalysis(d.format);
     } catch (e) {
       setErr(e instanceof Error ? e.message : "Remove failed");
     } finally {
@@ -242,6 +344,8 @@ export default function DeckDetailPage() {
       {err && (
         <div className="rounded-xl border border-red-500/30 bg-red-950/40 px-4 py-3 text-sm text-red-200">{err}</div>
       )}
+
+      <AnalysisPanel analysis={analysis} loading={analysisLoading} />
 
       <div className="grid gap-6 lg:grid-cols-3">
         <div className="space-y-4 rounded-2xl border border-white/10 bg-ink-900/40 p-6 lg:col-span-1">

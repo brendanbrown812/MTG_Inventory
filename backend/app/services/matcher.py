@@ -12,7 +12,7 @@ from dataclasses import dataclass
 
 from sqlalchemy.orm import Session, joinedload
 
-from app.models import CardCache, Deck, DeckCard
+from app.models import CardPrinting, Deck, DeckCard
 
 # Specificity weights: higher = rarer / more archetype-defining in Commander.
 # Tier 3 (2.5-3.0): narrow mechanics that define a single archetype.
@@ -121,7 +121,7 @@ ROLE_EDH_NORMS: dict[str, tuple[int, int]] = {
 _MIN_SYNERGY = 15.0
 
 
-def _parse_legalities(row: CardCache | None) -> dict[str, str]:
+def _parse_legalities(row: CardPrinting | None) -> dict[str, str]:
     if not row or not row.legalities_json:
         return {}
     try:
@@ -143,7 +143,7 @@ def _ci_set(s: str) -> frozenset[str]:
     return frozenset(x.strip() for x in s.split(",") if x.strip())
 
 
-def _oracle_blob(card: CardCache) -> str:
+def _oracle_blob(card: CardPrinting) -> str:
     return " ".join([card.name or "", card.type_line or "", card.oracle_text or ""]).lower()
 
 
@@ -185,8 +185,8 @@ class MatchResult:
     kind: str  # "synergy" | "upgrade"
 
 
-def _deck_cards_excluding_lands(db: Session, deck: Deck) -> list[CardCache]:
-    out: list[CardCache] = []
+def _deck_cards_excluding_lands(db: Session, deck: Deck) -> list[CardPrinting]:
+    out: list[CardPrinting] = []
     for dc in deck.cards:
         if dc.is_commander:
             continue
@@ -198,7 +198,7 @@ def _deck_cards_excluding_lands(db: Session, deck: Deck) -> list[CardCache]:
 
 def _allowed_ci_for_commander_deck(db: Session, deck: Deck) -> frozenset[str]:
     if deck.commander_scryfall_id:
-        cmd = db.get(CardCache, deck.commander_scryfall_id)
+        cmd = db.get(CardPrinting, deck.commander_scryfall_id)
         if cmd:
             return _ci_set(cmd.color_identity)
     u: set[str] = set()
@@ -208,7 +208,7 @@ def _allowed_ci_for_commander_deck(db: Session, deck: Deck) -> frozenset[str]:
     return frozenset(u)
 
 
-def build_deck_profile(cards: list[CardCache]) -> dict:
+def build_deck_profile(cards: list[CardPrinting]) -> dict:
     """
     Build a strategic profile of the deck's non-land cards.
 
@@ -273,9 +273,9 @@ def build_deck_profile(cards: list[CardCache]) -> dict:
 @dataclass
 class _DeckCtx:
     """Pre-built per-deck data shared across all cards in a match batch."""
-    non_land_cards: list[CardCache]
+    non_land_cards: list[CardPrinting]
     profile: dict
-    commander: CardCache | None
+    commander: CardPrinting | None
     allowed_ci: frozenset[str]
 
     @classmethod
@@ -284,7 +284,7 @@ class _DeckCtx:
         return cls(
             non_land_cards=cards,
             profile=build_deck_profile(cards),
-            commander=db.get(CardCache, deck.commander_scryfall_id) if deck.commander_scryfall_id else None,
+            commander=db.get(CardPrinting, deck.commander_scryfall_id) if deck.commander_scryfall_id else None,
             allowed_ci=_allowed_ci_for_commander_deck(db, deck),
         )
 
@@ -292,7 +292,7 @@ class _DeckCtx:
 def score_card_for_deck(
     db: Session,
     deck: Deck,
-    new_card: CardCache,
+    new_card: CardPrinting,
     ctx: _DeckCtx | None = None,
 ) -> MatchResult | None:
     if ctx is None:
@@ -434,7 +434,7 @@ def match_new_cards(
 
     results: dict[str, list[dict]] = {}
     for sfid in scryfall_ids:
-        card = db.get(CardCache, sfid)
+        card = db.get(CardPrinting, sfid)
         if not card:
             continue
         matches: list[dict] = []

@@ -28,14 +28,32 @@ if errorlevel 1 (
   goto :fail
 )
 
-where py >nul 2>&1
-if errorlevel 1 (
-  where python >nul 2>&1
-  if errorlevel 1 (
-    echo [ERROR] Python was not found ^(neither "py" nor "python" on PATH^).
-    echo         Install Python 3.10+ from https://www.python.org/downloads/
-    goto :fail
-  )
+set "PYTHON_MODE="
+if exist "%ROOT%backend\.venv\Scripts\python.exe" (
+  "%ROOT%backend\.venv\Scripts\python.exe" --version >nul 2>&1
+  if not errorlevel 1 set "PYTHON_MODE=venv"
+)
+
+if not defined PYTHON_MODE (
+  py -3 --version >nul 2>&1
+  if not errorlevel 1 set "PYTHON_MODE=py"
+)
+
+if not defined PYTHON_MODE (
+  python --version >nul 2>&1
+  if not errorlevel 1 set "PYTHON_MODE=python"
+)
+
+if not defined PYTHON_MODE (
+  echo [ERROR] Python 3 was not found.
+  echo.
+  echo         Windows has a "py" launcher, but it is not connected to an
+  echo         installed Python runtime. Install Python 3.12 from:
+  echo         https://www.python.org/downloads/windows/
+  echo.
+  echo         During setup, enable "Add python.exe to PATH", then run this
+  echo         launcher again.
+  goto :fail
 )
 
 netstat -ano 2>nul | findstr "LISTENING" | findstr /C:":8000 " >nul
@@ -64,8 +82,9 @@ echo.
 echo Starting API and UI in new windows...
 echo.
 
-where py >nul 2>&1
-if not errorlevel 1 (
+if "%PYTHON_MODE%"=="venv" (
+  start "Spellbinder — API (port 8000)" /D "%ROOT%backend" cmd /k ""%ROOT%backend\.venv\Scripts\python.exe" -m uvicorn app.main:app --host 127.0.0.1 --port 8000"
+) else if "%PYTHON_MODE%"=="py" (
   start "Spellbinder — API (port 8000)" /D "%ROOT%backend" cmd /k py -3 -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 ) else (
   start "Spellbinder — API (port 8000)" /D "%ROOT%backend" cmd /k python -m uvicorn app.main:app --host 127.0.0.1 --port 8000

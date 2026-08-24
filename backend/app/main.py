@@ -1,17 +1,40 @@
 import csv
 import io
+import json
 import re
+import threading
 import time
+import uuid
+from collections import Counter
+from datetime import UTC, datetime
 from typing import Annotated
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, UploadFile
+import httpx
+from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
+from sqlalchemy import func
+from sqlalchemy import text as sa_text
 from sqlalchemy.orm import Session, joinedload
 
 from app.config import settings
-from app.database import Base, engine, get_db
+from app.database import Base, SessionLocal, engine, get_db, run_migrations
 from app.logging_setup import configure_logging, get_logger
-from app.models import CardCache, Deck, DeckCard, InventoryLine
+from app.models import (
+    CardPrinting, Deck, DeckCard, EnrichmentStats, InventoryLine,
+    MechanicProfileRecord, OracleCard, RecommendationRun,
+)
+from app.enrichment.base import (
+    EnrichmentBatch,
+    card_to_provider_input,
+    persist_profile_batch,
+    profile_from_record,
+    validate_provider_batch,
+)
+from app.enrichment.pricing import estimate_cost, get_model_prices
+from app.enrichment.registry import build_enrichment_provider, provider_is_configured
+from app.mechanics.profile import PROFILE_SCHEMA_VERSION, TAXONOMY_VERSION
 from app.schemas import (
     CardResolveMatch,
     CardResolveOut,
@@ -28,18 +51,39 @@ from app.schemas import (
     InventoryLineOut,
 )
 from app.services.matcher import match_new_cards
+from app.services.commander_engine import analyze_commander_deck
+from app.services.candidate_retrieval import public_score_summary, retrieve_owned_candidates
+from app.reasoning.registry import build_strategy_reasoner
+from app.services.deck_pipeline import build_deck_with_reasoning
+from app.services.deck_optimizer import format_decklist, validate_optimized_deck
+from app.services.recommendation_history import (
+    candidates_for_run,
+    create_recommendation_run,
+    record_recommendation_feedback,
+)
+from app.security import api_key_is_valid, has_unprotected_remote_origin, validate_auth_configuration
 from app.services.scryfall_client import (
     ScryfallClient,
     bulk_ensure_cards_cached,
     bulk_ensure_cards_cached_by_name,
+    bulk_ensure_cards_cached_by_printing,
     ensure_card_cached,
     image_uri_normal_from_payload,
 )
 
 Base.metadata.create_all(bind=engine)
+run_migrations(engine)
 
 configure_logging()
 _log = get_logger()
+
+validate_auth_configuration()
+if has_unprotected_remote_origin():
+    _log.warning(
+        "CORS_ORIGINS includes a remote origin but authentication is not required. "
+        "This is acceptable for a backend bound only to 127.0.0.1; set REQUIRE_AUTH=true "
+        "before exposing the API to a LAN, tunnel, or public network."
+    )
 
 _text_import_progress: dict[int, dict] = {}
 _manabox_import_progress: dict[str, dict] = {}
@@ -53,6 +97,27 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+_PUBLIC_API_PATHS = {"/api/health", "/api/auth/status"}
+
+
+@app.middleware("http")
+async def require_api_key(request: Request, call_next):
+    content_length = request.headers.get("Content-Length")
+    if content_length:
+        try:
+            if int(content_length) > settings.max_request_bytes:
+                return JSONResponse(status_code=413, content={"detail": "Request body is too large"})
+        except ValueError:
+            return JSONResponse(status_code=400, content={"detail": "Invalid Content-Length header"})
+    if (
+        request.url.path.startswith("/api/")
+        and request.url.path not in _PUBLIC_API_PATHS
+        and not api_key_is_valid(request.headers.get("X-Spellbinder-Key"))
+    ):
+        return JSONResponse(status_code=401, content={"detail": "Invalid or missing Spellbinder API key"})
+    return await call_next(request)
 
 
 def _norm_bool(val: str | None) -> bool:
@@ -69,10 +134,35 @@ def _norm_str(val: str | None) -> str | None:
     return s if s else None
 
 
+def _validate_upload_size(raw: bytes) -> bytes:
+    if len(raw) > settings.max_upload_bytes:
+        max_mb = settings.max_upload_bytes / (1024 * 1024)
+        raise HTTPException(413, detail=f"Upload exceeds the {max_mb:g} MB limit")
+    return raw
+
+
+def _validate_text_size(value: str, *, ai: bool = False) -> str:
+    limit = settings.max_ai_text_chars if ai else settings.max_deck_text_chars
+    if len(value) > limit:
+        raise HTTPException(413, detail=f"Text input exceeds the {limit:,}-character limit")
+    return value
+
+
+def _require_card_cached(db: Session, scryfall_id: str) -> CardPrinting:
+    row = ensure_card_cached(db, scryfall_id)
+    if row is None:
+        raise HTTPException(400, detail=f"Unknown Scryfall card ID: {scryfall_id}")
+    return row
+
+
 _SCRYFALL_ID_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
     re.I,
 )
+
+
+def _utcnow() -> datetime:
+    return datetime.now(UTC).replace(tzinfo=None)
 
 
 def _merge_deck_card(
@@ -86,11 +176,14 @@ def _merge_deck_card(
 ) -> None:
     if qty <= 0:
         return
+    printing = db.get(CardPrinting, scryfall_id)
+    if printing is None:
+        raise ValueError(f"Card printing is not cached: {scryfall_id}")
     existing = (
         db.query(DeckCard)
         .filter(
             DeckCard.deck_id == deck_id,
-            DeckCard.scryfall_id == scryfall_id,
+            DeckCard.oracle_id == printing.oracle_id,
             DeckCard.is_commander == is_commander,
             DeckCard.is_sideboard == is_sideboard,
         )
@@ -103,11 +196,15 @@ def _merge_deck_card(
             DeckCard(
                 deck_id=deck_id,
                 scryfall_id=scryfall_id,
+                oracle_id=printing.oracle_id,
                 quantity=qty,
                 is_commander=is_commander,
                 is_sideboard=is_sideboard,
             )
         )
+        # SessionLocal disables autoflush; flush so another printing of the
+        # same Oracle card in this request merges into this row.
+        db.flush()
 
 
 def _merge_inventory_default(db: Session, scryfall_id: str, qty: int) -> None:
@@ -167,7 +264,7 @@ def _apply_deck_csv_rows(
 
     # Preload existing deck cards and inventory lines for in-memory merge.
     existing_dc: dict[tuple, DeckCard] = {
-        (dc.scryfall_id, dc.is_commander, dc.is_sideboard): dc
+        (dc.oracle_id, dc.is_commander, dc.is_sideboard): dc
         for dc in db.query(DeckCard).filter(DeckCard.deck_id == deck.id).all()
     }
     inv_map: dict[tuple, InventoryLine] = {}
@@ -196,11 +293,15 @@ def _apply_deck_csv_rows(
             errors.append(DeckCsvRowError(row_index=idx, error="Unknown Scryfall ID"))
             continue
 
-        dc_key = (sf, False, False)
+        printing = cache_map[sf]
+        dc_key = (printing.oracle_id, False, False)
         if dc_key in existing_dc:
             existing_dc[dc_key].quantity += qty
         else:
-            dc = DeckCard(deck_id=deck.id, scryfall_id=sf, quantity=qty, is_commander=False, is_sideboard=False)
+            dc = DeckCard(
+                deck_id=deck.id, scryfall_id=sf, oracle_id=printing.oracle_id,
+                quantity=qty, is_commander=False, is_sideboard=False,
+            )
             db.add(dc)
             existing_dc[dc_key] = dc
 
@@ -219,20 +320,74 @@ def _apply_deck_csv_rows(
 _QTY_NAME_LINE = re.compile(r"^(\d+)\s+(.+)$")
 # Matches Moxfield/Archidekt export suffix: "Card Name (SET) collector_number [*F*]"
 _SET_COLLECTOR_SUFFIX = re.compile(
-    r"^(.*?)\s+\([A-Z0-9]{2,6}\)\s+[A-Z0-9][A-Z0-9\-]*p?\s*(?:\*F\*\s*)?$",
+    r"^(.*?)\s+\(([A-Z0-9]{2,6})\)\s+(\S+?)\s*(\*F\*)?\s*$",
     re.IGNORECASE,
 )
 
 
-def _parse_qty_name_line(line: str) -> tuple[int, str] | None:
+def _parse_qty_name_details(
+    line: str,
+) -> tuple[int, str, str | None, str | None, bool] | None:
+    """Parse a quantity/name line while retaining optional printing hints."""
     m = _QTY_NAME_LINE.match(line.strip())
     if not m:
         return None
     qty = int(m.group(1))
     raw_name = m.group(2).strip()
     sm = _SET_COLLECTOR_SUFFIX.match(raw_name)
-    name = sm.group(1).strip() if sm else raw_name
-    return qty, name
+    if not sm:
+        return qty, raw_name, None, None, False
+    return (
+        qty,
+        sm.group(1).strip(),
+        sm.group(2).lower(),
+        sm.group(3),
+        bool(sm.group(4)),
+    )
+
+
+def _parse_qty_name_line(line: str) -> tuple[int, str] | None:
+    parsed = _parse_qty_name_details(line)
+    return (parsed[0], parsed[1]) if parsed else None
+
+
+def _deck_plaintext_lines(
+    text: str,
+) -> list[tuple[int, int | None, str, bool, str | None, str | None, bool]]:
+    """Return parsed lines; cards after the last blank line are commanders."""
+    raw = text.replace("\r\n", "\n").replace("\r", "\n")
+    lines = raw.split("\n")
+    while lines and not lines[-1].strip():
+        lines.pop()
+    last_blank_idx: int | None = None
+    for index in range(len(lines) - 1, -1, -1):
+        if not lines[index].strip():
+            last_blank_idx = index
+            break
+    ranges = (
+        [(range(0, len(lines)), False)]
+        if last_blank_idx is None
+        else [
+            (range(0, last_blank_idx), False),
+            (range(last_blank_idx + 1, len(lines)), True),
+        ]
+    )
+
+    parsed_lines = []
+    for line_range, is_commander in ranges:
+        for index in line_range:
+            line = lines[index].strip()
+            if not line:
+                continue
+            parsed = _parse_qty_name_details(line)
+            if parsed:
+                qty, name, set_code, collector_number, foil = parsed
+                parsed_lines.append(
+                    (index, qty, name, is_commander, set_code, collector_number, foil)
+                )
+            else:
+                parsed_lines.append((index, None, line, is_commander, None, None, False))
+    return parsed_lines
 
 
 def _resolve_card_name_to_id(db: Session, name: str) -> str | None:
@@ -259,35 +414,9 @@ def _apply_deck_plaintext(
     progress_key: int | None = None,
 ) -> list[DeckCsvRowError]:
     """Parse `qty name` lines; commander zone after last blank line. Line indices in errors are 0-based."""
-    raw = text.replace("\r\n", "\n").replace("\r", "\n")
-    lines = raw.split("\n")
-    while lines and not lines[-1].strip():
-        lines.pop()
-    last_blank_idx: int | None = None
-    for i in range(len(lines) - 1, -1, -1):
-        if not lines[i].strip():
-            last_blank_idx = i
-            break
-    if last_blank_idx is None:
-        ranges: list[tuple[range, bool]] = [(range(0, len(lines)), False)]
-    else:
-        ranges = [
-            (range(0, last_blank_idx), False),
-            (range(last_blank_idx + 1, len(lines)), True),
-        ]
-
     card_lines: list[tuple[int, int | None, str, bool]] = []
-    for line_range, is_commander in ranges:
-        for i in line_range:
-            line = lines[i].strip()
-            if not line:
-                continue
-            parsed = _parse_qty_name_line(line)
-            if parsed:
-                qty, name = parsed
-                card_lines.append((i, qty, name, is_commander))
-            else:
-                card_lines.append((i, None, line, is_commander))
+    for line_idx, qty, name, is_commander, _set_code, _collector, _foil in _deck_plaintext_lines(text):
+        card_lines.append((line_idx, qty, name, is_commander))
 
     total = len(card_lines)
     total_qty = sum(q for _, q, _, _ in card_lines if q is not None)
@@ -326,7 +455,7 @@ def _apply_deck_plaintext(
 
     # Preload existing deck cards for in-memory merge.
     existing_dc: dict[tuple, DeckCard] = {
-        (dc.scryfall_id, dc.is_commander, dc.is_sideboard): dc
+        (dc.oracle_id, dc.is_commander, dc.is_sideboard): dc
         for dc in db.query(DeckCard).filter(DeckCard.deck_id == deck.id).all()
     }
 
@@ -364,7 +493,7 @@ def _apply_deck_plaintext(
                 _log.debug("plaintext import fallback lookup: %r", name_or_raw)
                 sf = _resolve_card_name_to_id(db, name_or_raw)
                 if sf:
-                    card = db.get(CardCache, sf)
+                    card = db.get(CardPrinting, sf)
                     if card:
                         name_map[name_or_raw.lower()] = card  # cache for any duplicates
 
@@ -372,12 +501,12 @@ def _apply_deck_plaintext(
                 errors.append(DeckCsvRowError(row_index=line_idx, error=f"Card not found: {name_or_raw[:80]}"))
             else:
                 sf = card.scryfall_id
-                dc_key = (sf, is_commander, False)
+                dc_key = (card.oracle_id, is_commander, False)
                 if dc_key in existing_dc:
                     existing_dc[dc_key].quantity += qty
                 else:
                     dc = DeckCard(
-                        deck_id=deck.id, scryfall_id=sf, quantity=qty,
+                        deck_id=deck.id, scryfall_id=sf, oracle_id=card.oracle_id, quantity=qty,
                         is_commander=is_commander, is_sideboard=False,
                     )
                     db.add(dc)
@@ -385,6 +514,7 @@ def _apply_deck_plaintext(
 
                 if is_commander and deck.commander_scryfall_id is None:
                     deck.commander_scryfall_id = sf
+                    deck.commander_oracle_id = card.oracle_id
 
                 if add_to_collection:
                     inv_key = (sf, False, None, "en")
@@ -408,9 +538,121 @@ def _apply_deck_plaintext(
     return errors
 
 
+class _DeckTextPreviewRequest(BaseModel):
+    text: str = Field(min_length=1)
+
+
+def _preview_deck_plaintext(db: Session, text: str) -> dict:
+    parsed_lines = _deck_plaintext_lines(text)
+    exact_identifiers = [
+        (set_code, collector_number)
+        for _, qty, _, _, set_code, collector_number, _ in parsed_lines
+        if qty is not None and set_code and collector_number
+    ]
+    try:
+        exact_map = bulk_ensure_cards_cached_by_printing(db, exact_identifiers)
+    except httpx.HTTPError as exc:
+        _log.warning("Moxfield exact-printing lookup unavailable: %s", exc)
+        exact_map = {}
+
+    unresolved_names = []
+    for _, qty, name, _, set_code, collector_number, _ in parsed_lines:
+        if qty is None:
+            continue
+        key = (
+            (set_code or "").lower(),
+            (collector_number or "").lower(),
+        )
+        if not set_code or not collector_number or key not in exact_map:
+            unresolved_names.append(name)
+    unique_lower_names = {name.lower() for name in unresolved_names}
+    local_name_rows = (
+        db.query(CardPrinting)
+        .options(joinedload(CardPrinting.oracle))
+        .join(OracleCard)
+        .filter(func.lower(OracleCard.name).in_(unique_lower_names))
+        .all()
+        if unique_lower_names else []
+    )
+    name_map: dict[str, CardPrinting] = {}
+    for row in local_name_rows:
+        name_map.setdefault(row.name.lower(), row)
+
+    names_to_fetch = [name for name in unresolved_names if name.lower() not in name_map]
+    if names_to_fetch:
+        try:
+            name_map.update(bulk_ensure_cards_cached_by_name(db, names_to_fetch))
+        except httpx.HTTPError as exc:
+            _log.warning("Moxfield name lookup unavailable: %s", exc)
+
+    owned_rows = (
+        db.query(CardPrinting.oracle_id, func.sum(InventoryLine.quantity))
+        .join(InventoryLine, InventoryLine.scryfall_id == CardPrinting.scryfall_id)
+        .group_by(CardPrinting.oracle_id)
+        .all()
+    )
+    owned_by_oracle = {oracle_id: int(quantity or 0) for oracle_id, quantity in owned_rows}
+
+    cards = []
+    errors = []
+    for line_idx, qty, name, is_commander, set_code, collector_number, foil in parsed_lines:
+        if qty is None:
+            errors.append({
+                "row_index": line_idx,
+                "error": f"Expected 'qty name': {name[:80]}",
+            })
+            continue
+        exact_key = (
+            (set_code or "").lower(),
+            (collector_number or "").lower(),
+        )
+        card = exact_map.get(exact_key) if set_code and collector_number else None
+        if card is None:
+            card = name_map.get(name.lower())
+        if card is None:
+            try:
+                card_id = _resolve_card_name_to_id(db, name)
+            except httpx.HTTPError as exc:
+                _log.warning("Moxfield fallback lookup unavailable for %r: %s", name, exc)
+                card_id = None
+            card = db.get(CardPrinting, card_id) if card_id else None
+        if card is None:
+            errors.append({"row_index": line_idx, "error": f"Card not found: {name[:80]}"})
+            continue
+        cards.append({
+            "line_index": line_idx,
+            "quantity": qty,
+            "scryfall_id": card.scryfall_id,
+            "oracle_id": card.oracle_id,
+            "name": card.name,
+            "type_line": card.type_line,
+            "colors": card.colors,
+            "image_uri_normal": card.image_uri_normal,
+            "set_code": card.set_code or set_code,
+            "collector_number": card.collector_number or collector_number,
+            "foil": foil,
+            "is_commander": is_commander,
+            "owned_quantity": owned_by_oracle.get(card.oracle_id, 0),
+        })
+    return {
+        "cards": cards,
+        "row_errors": errors,
+        "total_quantity": sum(card["quantity"] for card in cards),
+    }
+
+
 @app.get("/api/health")
 def health():
     return {"ok": True}
+
+
+@app.get("/api/auth/status")
+def auth_status(request: Request):
+    required = bool(settings.app_api_key)
+    return {
+        "required": required,
+        "authenticated": not required or api_key_is_valid(request.headers.get("X-Spellbinder-Key")),
+    }
 
 
 @app.get("/api/inventory", response_model=list[InventoryLineOut])
@@ -421,12 +663,12 @@ def list_inventory(
 ):
     query = db.query(InventoryLine).options(joinedload(InventoryLine.card))
     if q or sort == "name":
-        query = query.join(CardCache, InventoryLine.scryfall_id == CardCache.scryfall_id)
+        query = query.join(CardPrinting).join(OracleCard)
     if q:
         like = f"%{q}%"
-        query = query.filter(CardCache.name.ilike(like))
+        query = query.filter(OracleCard.name.ilike(like))
     if sort == "name":
-        query = query.order_by(CardCache.name, InventoryLine.id)
+        query = query.order_by(OracleCard.name, InventoryLine.id)
     elif sort == "quantity":
         query = query.order_by(InventoryLine.quantity.desc(), InventoryLine.id)
     elif sort == "set":
@@ -458,7 +700,7 @@ def clear_inventory(db: Annotated[Session, Depends(get_db)]):
 
 
 @app.get("/api/import/manabox/progress")
-def get_manabox_progress(import_key: str = Query(default="")):
+def get_manabox_progress(import_key: str = Query(default="", max_length=100)):
     return _manabox_import_progress.get(import_key)
 
 
@@ -466,11 +708,12 @@ def get_manabox_progress(import_key: str = Query(default="")):
 def import_manabox(
     db: Annotated[Session, Depends(get_db)],
     file: UploadFile = File(...),
-    import_key: str = Query(default=""),
+    import_key: str = Query(default="", max_length=100),
 ):
-    raw = file.file.read()
+    raw = _validate_upload_size(file.file.read(settings.max_upload_bytes + 1))
     _log.info(
-        "ManaBox import started filename=%r size_bytes=%s",
+        "ManaBox import started import_key=%s filename=%r size_bytes=%s",
+        import_key or "none",
         file.filename,
         len(raw),
     )
@@ -492,24 +735,39 @@ def import_manabox(
     ]
 
     if import_key:
-        _manabox_import_progress[import_key] = {"batches_done": 0, "batches_total": 0}
+        _manabox_import_progress[import_key] = {
+            "status": "running", "stage": "hydrating_cards",
+            "batches_done": 0, "batches_total": 0,
+        }
 
     def _on_batch(done: int, total: int) -> None:
         if import_key:
-            _manabox_import_progress[import_key] = {"batches_done": done, "batches_total": total}
+            _manabox_import_progress[import_key] = {
+                "status": "running", "stage": "hydrating_cards",
+                "batches_done": done, "batches_total": total,
+            }
 
+    stage = "hydrating_cards"
     try:
         bulk_ensure_cards_cached(
             db,
             [sid for sid in ids_in_file if sid],
             progress_callback=_on_batch if import_key else None,
+            refresh_stale=False,
         )
+
+        stage = "assembling_inventory"
+        if import_key:
+            current_progress = _manabox_import_progress.get(import_key, {})
+            _manabox_import_progress[import_key] = {
+                **current_progress, "status": "running", "stage": stage,
+            }
 
         # Bulk-load all card data and existing inventory lines before the loop so
         # every row resolves from a Python dict rather than hitting the DB.
         unique_ids = list(dict.fromkeys(sid for sid in ids_in_file if sid))
-        card_map: dict[str, CardCache] = (
-            {c.scryfall_id: c for c in db.query(CardCache).filter(CardCache.scryfall_id.in_(unique_ids)).all()}
+        card_map: dict[str, CardPrinting] = (
+            {c.scryfall_id: c for c in db.query(CardPrinting).filter(CardPrinting.scryfall_id.in_(unique_ids)).all()}
             if unique_ids else {}
         )
         inv_map: dict[tuple, InventoryLine] = (
@@ -521,8 +779,7 @@ def import_manabox(
         rows_out: list[ImportRowResult] = []
         added_qty = 0
 
-        try:
-            for idx, row in enumerate(all_rows):
+        for idx, row in enumerate(all_rows):
                 key_map = {k.strip().lower(): v for k, v in row.items() if k}
                 sf = _norm_str(key_map.get("scryfall id"))
                 name = _norm_str(key_map.get("name"))
@@ -615,41 +872,80 @@ def import_manabox(
                     )
                 )
 
-            # Single commit for all inventory changes.
-            db.commit()
+        # Single commit keeps the inventory portion atomic.
+        db.commit()
+        _log.info(
+            "ManaBox inventory committed import_key=%s rows=%d quantity=%d",
+            import_key or "none",
+            len(rows_out),
+            added_qty,
+        )
 
-            # Score all successfully imported cards against decks in one pass —
-            # match_new_cards loads all decks once regardless of how many IDs are given.
-            ok_ids = [r.scryfall_id for r in rows_out if r.ok and r.scryfall_id]
-            if ok_ids:
+        # Recommendation matching is useful but must never turn a successful
+        # inventory commit into a reported import failure.
+        stage = "matching_decks"
+        ok_ids = list(dict.fromkeys(
+            r.scryfall_id for r in rows_out if r.ok and r.scryfall_id
+        ))
+        if ok_ids:
+            try:
                 all_matches = match_new_cards(db, ok_ids, min_score=35.0)
                 for r in rows_out:
                     if r.ok and r.scryfall_id:
                         r.matches = all_matches.get(r.scryfall_id, [])
-
-        except HTTPException:
-            raise
-        except Exception:
-            _log.exception("ManaBox import failed (uncaught exception)")
-            raise HTTPException(
-                status_code=500,
-                detail="Import failed. Check the API console window or backend/logs/spellbinder.log for the traceback.",
-            ) from None
+            except Exception:
+                _log.exception(
+                    "ManaBox deck matching failed after inventory commit import_key=%s; continuing",
+                    import_key or "none",
+                )
 
         _log.info(
-            "ManaBox import finished row_results=%s total_quantity_added=%s",
+            "ManaBox import finished import_key=%s row_results=%s total_quantity_added=%s",
+            import_key or "none",
             len(rows_out),
             added_qty,
         )
+        if import_key:
+            _manabox_import_progress[import_key] = {
+                "status": "complete", "stage": "complete",
+                "batches_done": _manabox_import_progress.get(import_key, {}).get("batches_done", 0),
+                "batches_total": _manabox_import_progress.get(import_key, {}).get("batches_total", 0),
+            }
         return ImportResult(added_quantity=added_qty, rows=rows_out)
-    finally:
-        _manabox_import_progress.pop(import_key, None)
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as exc:
+        db.rollback()
+        _log.exception(
+            "ManaBox import failed import_key=%s stage=%s filename=%r rows=%d",
+            import_key or "none",
+            stage,
+            file.filename,
+            len(all_rows),
+        )
+        if import_key:
+            current_progress = _manabox_import_progress.get(import_key, {})
+            _manabox_import_progress[import_key] = {
+                **current_progress,
+                "status": "failed",
+                "stage": stage,
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+        status_code = 502 if isinstance(exc, httpx.HTTPError) else 500
+        raise HTTPException(
+            status_code=status_code,
+            detail=(
+                f"Import failed during {stage}. The failure was logged to "
+                "backend/logs/spellbinder.log; rerunning will reuse cached Scryfall batches."
+            ),
+        ) from None
 
 
 @app.get("/api/cards/resolve", response_model=CardResolveOut)
 def resolve_card(
-    q: str,
     db: Annotated[Session, Depends(get_db)],
+    q: str = Query(min_length=1, max_length=500),
 ):
     query = (q or "").strip()
     if not query:
@@ -704,9 +1000,12 @@ def resolve_card(
 @app.get("/api/cards/{scryfall_id}/decks")
 def card_in_decks(scryfall_id: str, db: Annotated[Session, Depends(get_db)]):
     """Return the decks that actually contain this card."""
+    printing = db.get(CardPrinting, scryfall_id)
+    if printing is None:
+        return []
     rows = (
         db.query(DeckCard)
-        .filter(DeckCard.scryfall_id == scryfall_id)
+        .filter(DeckCard.oracle_id == printing.oracle_id)
         .options(joinedload(DeckCard.deck))
         .all()
     )
@@ -734,17 +1033,23 @@ def list_decks(db: Annotated[Session, Depends(get_db)]):
 
 @app.post("/api/decks", response_model=DeckDetailOut)
 def create_deck(body: DeckCreate, db: Annotated[Session, Depends(get_db)]):
+    commander_oracle_id = None
+    if body.commander_scryfall_id:
+        commander_oracle_id = _require_card_cached(
+            db, body.commander_scryfall_id
+        ).oracle_id
     d = Deck(
         name=body.name,
         format=body.format,
         status=body.status,
         notes=body.notes,
         commander_scryfall_id=body.commander_scryfall_id,
+        commander_oracle_id=commander_oracle_id,
     )
     db.add(d)
     db.flush()
     for c in body.cards:
-        ensure_card_cached(db, c.scryfall_id)
+        _require_card_cached(db, c.scryfall_id)
         _merge_deck_card(
             db,
             d.id,
@@ -755,8 +1060,21 @@ def create_deck(body: DeckCreate, db: Annotated[Session, Depends(get_db)]):
         )
         if c.is_commander:
             d.commander_scryfall_id = c.scryfall_id
+            d.commander_oracle_id = db.get(CardPrinting, c.scryfall_id).oracle_id
     db.commit()
     return get_deck(d.id, db)
+
+
+@app.post("/api/decks/preview-text")
+def preview_deck_text(
+    body: _DeckTextPreviewRequest,
+    db: Annotated[Session, Depends(get_db)],
+):
+    """Resolve a Moxfield/plaintext list without creating or changing a deck."""
+    _validate_text_size(body.text)
+    if not body.text.strip():
+        raise HTTPException(400, detail="Deck list text is empty")
+    return _preview_deck_plaintext(db, body.text)
 
 
 @app.get("/api/decks/{deck_id}", response_model=DeckDetailOut)
@@ -772,12 +1090,36 @@ def get_deck(deck_id: int, db: Annotated[Session, Depends(get_db)]):
     return d
 
 
+@app.get("/api/decks/{deck_id}/analysis")
+def analyze_deck(deck_id: int, db: Annotated[Session, Depends(get_db)]):
+    """Run deterministic Commander legality, availability, and health checks."""
+    deck = (
+        db.query(Deck)
+        .options(
+            joinedload(Deck.cards).joinedload(DeckCard.card).joinedload(CardPrinting.oracle),
+            joinedload(Deck.cards).joinedload(DeckCard.oracle_card),
+        )
+        .filter(Deck.id == deck_id)
+        .first()
+    )
+    if not deck:
+        raise HTTPException(404, detail="Deck not found")
+    if (deck.format or "").lower() not in {"commander", "edh"}:
+        raise HTTPException(400, detail="Deterministic analysis currently supports Commander decks")
+    return analyze_commander_deck(db, deck)
+
+
 @app.patch("/api/decks/{deck_id}", response_model=DeckDetailOut)
 def patch_deck(deck_id: int, body: DeckUpdate, db: Annotated[Session, Depends(get_db)]):
     d = db.get(Deck, deck_id)
     if not d:
         raise HTTPException(404, detail="Deck not found")
     data = body.model_dump(exclude_unset=True)
+    if "commander_scryfall_id" in data:
+        commander_id = data["commander_scryfall_id"]
+        d.commander_oracle_id = (
+            _require_card_cached(db, commander_id).oracle_id if commander_id else None
+        )
     for k, v in data.items():
         setattr(d, k, v)
     db.commit()
@@ -791,7 +1133,7 @@ def add_deck_cards(deck_id: int, cards: list[DeckCardIn], db: Annotated[Session,
         raise HTTPException(404, detail="Deck not found")
 
     for c in cards:
-        ensure_card_cached(db, c.scryfall_id)
+        _require_card_cached(db, c.scryfall_id)
         _merge_deck_card(
             db,
             deck_id,
@@ -802,6 +1144,7 @@ def add_deck_cards(deck_id: int, cards: list[DeckCardIn], db: Annotated[Session,
         )
         if c.is_commander:
             d.commander_scryfall_id = c.scryfall_id
+            d.commander_oracle_id = db.get(CardPrinting, c.scryfall_id).oracle_id
     db.commit()
     return get_deck(deck_id, db)
 
@@ -818,7 +1161,7 @@ async def import_csv_new_deck(
     name = deck_name.strip()
     if not name:
         raise HTTPException(400, detail="Deck name is required")
-    raw = await file.read()
+    raw = _validate_upload_size(await file.read(settings.max_upload_bytes + 1))
     text = raw.decode("utf-8-sig", errors="replace")
     reader = _deck_csv_reader(text)
     d = Deck(name=name, format=format, status=status)
@@ -840,7 +1183,7 @@ async def import_csv_existing_deck(
     d = db.get(Deck, deck_id)
     if not d:
         raise HTTPException(404, detail="Deck not found")
-    raw = await file.read()
+    raw = _validate_upload_size(await file.read(settings.max_upload_bytes + 1))
     text = raw.decode("utf-8-sig", errors="replace")
     reader = _deck_csv_reader(text)
     errors = _apply_deck_csv_rows(db, d, reader, add_to_collection)
@@ -865,6 +1208,7 @@ def import_text_new_deck(
     name = deck_name.strip()
     if not name:
         raise HTTPException(400, detail="Deck name is required")
+    _validate_text_size(text)
     body = (text or "").strip()
     if not body:
         raise HTTPException(400, detail="Deck list text is empty")
@@ -897,14 +1241,17 @@ def import_text_existing_deck(
     d = db.get(Deck, deck_id)
     if not d:
         raise HTTPException(404, detail="Deck not found")
+    _validate_text_size(text)
     body = (text or "").strip()
     if not body:
         raise HTTPException(400, detail="Deck list text is empty")
     _log.info("Deck text import (existing) deck_id=%s add_to_collection=%s", deck_id, add_to_collection)
-    errors = _apply_deck_plaintext(db, d, text, add_to_collection, progress_key=deck_id)
-    db.commit()
-    _text_import_progress.pop(deck_id, None)
-    return DeckCsvImportOut(deck=get_deck(deck_id, db), row_errors=errors)
+    try:
+        errors = _apply_deck_plaintext(db, d, text, add_to_collection, progress_key=deck_id)
+        db.commit()
+        return DeckCsvImportOut(deck=get_deck(deck_id, db), row_errors=errors)
+    finally:
+        _text_import_progress.pop(deck_id, None)
 
 
 @app.delete("/api/decks/{deck_id}/cards/{deck_card_id}", response_model=DeckDetailOut)
@@ -925,3 +1272,689 @@ def delete_deck(deck_id: int, db: Annotated[Session, Depends(get_db)]):
     db.delete(d)
     db.commit()
     return {"ok": True}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Enrichment endpoints — Scryfall backfill + structured mechanic profiles
+# ══════════════════════════════════════════════════════════════════════════════
+
+_enrichment_jobs: dict[str, dict] = {}
+_enrichment_jobs_lock = threading.Lock()
+_MAX_ENRICHMENT_JOB_HISTORY = 100
+
+
+def _start_enrichment_job(job_type: str, total: int) -> str:
+    with _enrichment_jobs_lock:
+        if any(job.get("status") == "running" for job in _enrichment_jobs.values()):
+            raise HTTPException(409, detail="An enrichment job is already running")
+
+        finished = [job_id for job_id, job in _enrichment_jobs.items() if job.get("status") != "running"]
+        excess = len(_enrichment_jobs) - _MAX_ENRICHMENT_JOB_HISTORY + 1
+        for old_job_id in finished[:max(0, excess)]:
+            _enrichment_jobs.pop(old_job_id, None)
+
+        job_id = str(uuid.uuid4())
+        _enrichment_jobs[job_id] = {
+            "status": "running",
+            "type": job_type,
+            "processed": 0,
+            "total": total,
+        }
+        return job_id
+
+
+def _update_enrichment_job(job_id: str, **values) -> None:
+    with _enrichment_jobs_lock:
+        job = _enrichment_jobs.get(job_id)
+        if job is not None:
+            job.update(values)
+
+
+def _select_enrichment_batch(db: Session, batch_size: int) -> list[OracleCard]:
+    """
+    Select cards without a current profile for this schema/taxonomy, prioritizing
+    common Scryfall keywords first, then keyword-less cards ordered by ID.
+    Pure Python sort after a single bulk query — fine for personal collection sizes.
+    """
+    profiled_ids = (
+        db.query(MechanicProfileRecord.oracle_id)
+        .filter(
+            MechanicProfileRecord.is_current.is_(True),
+            MechanicProfileRecord.schema_version == PROFILE_SCHEMA_VERSION,
+            MechanicProfileRecord.taxonomy_version == TAXONOMY_VERSION,
+        )
+    )
+    unprofiled: list[OracleCard] = (
+        db.query(OracleCard)
+        .filter(OracleCard.oracle_id.notin_(profiled_ids))
+        .all()
+    )
+    if not unprofiled:
+        return []
+
+    with_kw  = [c for c in unprofiled if c.keywords and c.keywords not in ("[]", "null", "")]
+    no_kw    = [c for c in unprofiled if not c.keywords or c.keywords in ("[]", "null", "")]
+
+    kw_counts: Counter = Counter()
+    for c in with_kw:
+        try:
+            for kw in json.loads(c.keywords):
+                kw_counts[kw] += 1
+        except Exception:
+            pass
+
+    def _max_freq(c: OracleCard) -> int:
+        try:
+            return max((kw_counts[kw] for kw in json.loads(c.keywords)), default=0)
+        except Exception:
+            return 0
+
+    with_kw.sort(key=_max_freq, reverse=True)
+
+    selected = with_kw[:batch_size]
+    if len(selected) < batch_size:
+        selected += no_kw[:batch_size - len(selected)]
+    return selected
+
+
+def _run_scryfall_backfill(job_id: str, batch_size: int) -> None:
+    db = SessionLocal()
+    try:
+        cards: list[CardPrinting] = (
+            db.query(CardPrinting)
+            .join(OracleCard)
+            .filter(OracleCard.keywords.is_(None))
+            .group_by(OracleCard.oracle_id)
+            .limit(batch_size)
+            .all()
+        )
+        total = len(cards)
+        _update_enrichment_job(job_id, total=total, processed=0)
+
+        client = ScryfallClient()
+
+        # Use batch endpoint (75 at a time) — much faster than per-card calls
+        ids = [c.scryfall_id for c in cards]
+        batch_size_sf = 75
+
+        done = 0
+        failed = 0
+        for i in range(0, len(ids), batch_size_sf):
+            chunk_ids = ids[i : i + batch_size_sf]
+            found, not_found = client.fetch_cards_collection(chunk_ids)
+            for data in found:
+                client.upsert_cache_from_scryfall(db, data, commit=False)
+            db.commit()
+            done += len(found)
+            failed += len(not_found)
+            _update_enrichment_job(job_id, processed=done, failed=failed)
+
+        _update_enrichment_job(job_id, status="done")
+        _log.info("Scryfall backfill done job_id=%s cards=%s", job_id, total)
+    except Exception as exc:
+        _update_enrichment_job(job_id, status="error", error=str(exc))
+        _log.exception("Scryfall backfill failed job_id=%s", job_id)
+    finally:
+        db.close()
+
+
+def _run_structured_enrichment(job_id: str, batch_size: int) -> None:
+    db = SessionLocal()
+    try:
+        provider = build_enrichment_provider()
+        cards = _select_enrichment_batch(db, batch_size)
+        total = len(cards)
+        _update_enrichment_job(job_id, total=total, processed=0)
+
+        batch_id = str(uuid.uuid4())
+        processed = 0
+        chunk_size = 12
+
+        for i in range(0, total, chunk_size):
+            chunk = cards[i : i + chunk_size]
+            provider_cards = [card_to_provider_input(card) for card in chunk]
+            batch = provider.enrich(provider_cards)
+            ordered_profiles = validate_provider_batch(provider_cards, batch)
+            validated_batch = EnrichmentBatch(profiles=ordered_profiles, usage=batch.usage)
+            persist_profile_batch(db, provider, validated_batch)
+
+            db.add(EnrichmentStats(
+                batch_id=batch_id,
+                model=f"{provider.provider_name}:{provider.model_name}",
+                input_tokens=batch.usage.input_tokens,
+                output_tokens=batch.usage.output_tokens,
+                cards_processed=len(chunk),
+            ))
+            db.commit()
+
+            processed += len(chunk)
+            _update_enrichment_job(job_id, processed=processed)
+            _log.info(
+                "Structured enrichment chunk done job_id=%s processed=%s/%s provider=%s model=%s",
+                job_id, processed, total, provider.provider_name, provider.model_name,
+            )
+
+        _update_enrichment_job(job_id, status="done")
+    except Exception as exc:
+        _update_enrichment_job(job_id, status="error", error=str(exc))
+        _log.exception("Structured enrichment job failed job_id=%s", job_id)
+    finally:
+        db.close()
+
+
+@app.get("/api/enrichment/status")
+def enrichment_status(db: Annotated[Session, Depends(get_db)]):
+    total = db.query(OracleCard).count()
+    profiled = (
+        db.query(MechanicProfileRecord.oracle_id)
+        .filter(
+            MechanicProfileRecord.is_current.is_(True),
+            MechanicProfileRecord.schema_version == PROFILE_SCHEMA_VERSION,
+            MechanicProfileRecord.taxonomy_version == TAXONOMY_VERSION,
+        )
+        .distinct()
+        .count()
+    )
+    keywords_miss = db.query(OracleCard).filter(OracleCard.keywords.is_(None)).count()
+    stats_model = f"{settings.enrichment_provider}:{settings.enrichment_model}"
+
+    stats = db.execute(sa_text("""
+        SELECT SUM(input_tokens), SUM(output_tokens), SUM(cards_processed)
+        FROM tagging_stats
+        WHERE model = :model
+    """), {"model": stats_model}).fetchone()
+
+    avg_in = avg_out = None
+    if stats and stats[2]:
+        avg_in  = stats[0] / stats[2]
+        avg_out = stats[1] / stats[2]
+
+    unprofiled = total - profiled
+    est_cost = estimate_cost(
+        settings.enrichment_provider,
+        settings.enrichment_model,
+        unprofiled,
+        avg_in,
+        avg_out,
+    )
+    prices = get_model_prices(settings.enrichment_provider, settings.enrichment_model)
+
+    return {
+        "total_cards":                total,
+        "profiled_cards":             profiled,
+        "unprofiled_cards":           unprofiled,
+        "keywords_missing":           keywords_miss,
+        "profile_schema_version":     PROFILE_SCHEMA_VERSION,
+        "taxonomy_version":           TAXONOMY_VERSION,
+        "enrichment_provider":        settings.enrichment_provider,
+        "enrichment_model":           settings.enrichment_model,
+        "provider_configured":        provider_is_configured(),
+        "deckbuilding_model":         settings.deckbuilding_model,
+        "model_prices":               prices,
+        "avg_input_tokens_per_card":  avg_in,
+        "avg_output_tokens_per_card": avg_out,
+        "estimated_cost_all_unprofiled": round(est_cost, 4),
+    }
+
+
+class _ScryfallBatchRequest(BaseModel):
+    batch_size: int = Field(ge=1, le=settings.max_scryfall_batch_size)
+
+
+class _EnrichmentBatchRequest(BaseModel):
+    batch_size: int = Field(ge=1, le=settings.max_enrichment_batch_size)
+
+
+@app.post("/api/enrichment/backfill-scryfall")
+def start_scryfall_backfill(body: _ScryfallBatchRequest, background_tasks: BackgroundTasks):
+    """Re-fetch Scryfall data for cards missing keywords. Free — no AI cost."""
+    job_id = _start_enrichment_job("scryfall_backfill", 0)
+    background_tasks.add_task(_run_scryfall_backfill, job_id, body.batch_size)
+    return {"job_id": job_id}
+
+
+@app.post("/api/enrichment/run")
+def start_structured_enrichment(body: _EnrichmentBatchRequest, background_tasks: BackgroundTasks):
+    """Create versioned structured mechanic profiles with the configured provider."""
+    if not provider_is_configured():
+        raise HTTPException(
+            400,
+            detail=f"Enrichment provider {settings.enrichment_provider!r} is not configured",
+        )
+    job_id = _start_enrichment_job("structured_mechanic_profiles", body.batch_size)
+    background_tasks.add_task(_run_structured_enrichment, job_id, body.batch_size)
+    return {"job_id": job_id}
+
+
+@app.get("/api/enrichment/progress/{job_id}")
+def enrichment_progress(job_id: str):
+    with _enrichment_jobs_lock:
+        job = dict(_enrichment_jobs[job_id]) if job_id in _enrichment_jobs else None
+    if job is None:
+        raise HTTPException(404, detail="Job not found")
+    return job
+
+
+@app.get("/api/enrichment/sample")
+def enrichment_sample(
+    db: Annotated[Session, Depends(get_db)],
+    n: int = Query(default=20, ge=1, le=100),
+):
+    """
+    Return recently-created structured profiles for quality review.
+    """
+    rows = (
+        db.query(MechanicProfileRecord)
+        .filter(
+            MechanicProfileRecord.is_current.is_(True),
+            MechanicProfileRecord.schema_version == PROFILE_SCHEMA_VERSION,
+            MechanicProfileRecord.taxonomy_version == TAXONOMY_VERSION,
+        )
+        .order_by(MechanicProfileRecord.created_at.desc())
+        .limit(n)
+        .all()
+    )
+    return [
+        {
+            "name": record.oracle.name,
+            "type_line": record.oracle.type_line,
+            "oracle_text": record.oracle.oracle_text,
+            "keywords": json.loads(record.oracle.keywords or "[]"),
+            "profile": profile_from_record(record).model_dump(mode="json"),
+            "provider": record.provider,
+            "model": record.model,
+            "created_at": record.created_at.isoformat(),
+        }
+        for record in rows
+    ]
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Deckbuilding endpoints
+# ══════════════════════════════════════════════════════════════════════════════
+
+_QTY_NAME_RE = re.compile(r"^(\d+)\s+(.+)$")
+
+
+def _build_candidate_pool(
+    db: Session,
+    query: str | list[str],
+    exclude_names: set[str] | None = None,
+    *,
+    seed_names: set[str] | None = None,
+    commander_name: str | None = None,
+    limit: int = 200,
+) -> list[dict]:
+    query_text = " ".join(query) if isinstance(query, list) else query
+    return retrieve_owned_candidates(
+        db,
+        query_text,
+        seed_names=seed_names,
+        commander_name=commander_name,
+        exclude_names=exclude_names,
+        limit=limit,
+    )
+
+
+def _validate_decklist(db: Session, decklist_text: str) -> list[str]:
+    """
+    Deterministic post-processing checks on a Claude-returned decklist.
+    Returns a list of warning strings (empty = clean).
+    """
+    warnings: list[str] = []
+    lines = [l.strip() for l in decklist_text.strip().splitlines() if l.strip()]
+
+    parsed: list[tuple[int, str]] = []
+    for line in lines:
+        m = _QTY_NAME_RE.match(line)
+        if m:
+            parsed.append((int(m.group(1)), m.group(2).strip()))
+
+    total = sum(q for q, _ in parsed)
+    if total != 100:
+        warnings.append(f"Deck has {total} cards — Commander requires exactly 100.")
+
+    name_counts: Counter = Counter(n.lower() for _, n in parsed)
+    dups = [n for n, c in name_counts.items() if c > 1 and "basic" not in n]
+    if dups:
+        warnings.append(f"Non-basic duplicates found: {', '.join(dups[:5])}")
+
+    all_names = [n for _, n in parsed]
+    db_map = {
+        c.name.lower(): c
+        for c in db.query(CardPrinting).join(OracleCard).filter(OracleCard.name.in_(all_names)).all()
+    }
+    owned_oracle_ids = {
+        row[0]
+        for row in (
+            db.query(CardPrinting.oracle_id)
+            .join(InventoryLine, InventoryLine.scryfall_id == CardPrinting.scryfall_id)
+            .distinct()
+            .all()
+        )
+    }
+
+    not_found  = []
+    not_legal  = []
+    not_owned  = []
+    land_total = 0
+
+    for qty, name in parsed:
+        nl = name.lower()
+        if "basic land" in nl or any(
+            bl in nl for bl in ("plains", "island", "swamp", "mountain", "forest")
+        ):
+            land_total += qty
+            continue
+        card = db_map.get(nl)
+        if not card:
+            not_found.append(name)
+            continue
+        if card.legalities_json:
+            leg = json.loads(card.legalities_json)
+            if leg.get("commander") != "legal":
+                not_legal.append(name)
+        if card.oracle_id not in owned_oracle_ids:
+            not_owned.append(name)
+        if card.type_line and "land" in card.type_line.lower():
+            land_total += qty
+
+    if not_found:
+        warnings.append(f"Cards not found in local DB: {', '.join(not_found[:5])}")
+    if not_legal:
+        warnings.append(f"Not Commander-legal: {', '.join(not_legal[:5])}")
+    if not_owned:
+        warnings.append(f"Not in your collection: {', '.join(not_owned[:5])}")
+    if land_total < 16:
+        warnings.append(f"Low land count ({land_total}) — Commander decks typically need 35–38.")
+    elif land_total > 42:
+        warnings.append(f"High land count ({land_total}) — may want to cut some.")
+
+    return warnings
+
+
+def _parse_existing_deck_names(decklist_text: str) -> set[str]:
+    names = set()
+    for line in decklist_text.strip().splitlines():
+        line = line.strip()
+        m = _QTY_NAME_RE.match(line)
+        if m:
+            names.add(m.group(2).strip().lower())
+        elif line:
+            names.add(line.lower())
+    return names
+
+
+class _BuildRequest(BaseModel):
+    theme: str = Field(min_length=1, max_length=2_000)
+    commander_name: str | None = Field(default=None, max_length=500)
+
+
+class _SuggestRequest(BaseModel):
+    current_list: str = Field(min_length=1, max_length=settings.max_ai_text_chars)
+    theme_hint: str | None = Field(default=None, max_length=2_000)
+
+
+class _AuditRequest(BaseModel):
+    decklist: str = Field(min_length=1, max_length=settings.max_ai_text_chars)
+
+
+class _CandidateRequest(BaseModel):
+    query: str = Field(default="", max_length=2_000)
+    seed_names: list[str] = Field(default_factory=list, max_length=200)
+    commander_name: str | None = Field(default=None, max_length=500)
+    exclude_names: list[str] = Field(default_factory=list, max_length=200)
+    limit: int = Field(default=100, ge=1, le=200)
+
+
+class _DraftEntry(BaseModel):
+    scryfall_id: str = Field(min_length=1, max_length=64)
+    oracle_id: str = Field(min_length=1, max_length=64)
+    name: str = Field(min_length=1, max_length=500)
+    quantity: int = Field(ge=1, le=999)
+    is_commander: bool = False
+
+
+class _DraftRequest(BaseModel):
+    entries: list[_DraftEntry] = Field(min_length=1, max_length=250)
+
+
+class _SaveRecommendationRequest(_DraftRequest):
+    deck_name: str = Field(min_length=1, max_length=200)
+    rating: int | None = Field(default=None, ge=1, le=5)
+    notes: str | None = Field(default=None, max_length=10_000)
+
+
+class _RecommendationFeedbackRequest(_DraftRequest):
+    outcome: str = Field(pattern="^(saved|edited|accepted|rejected)$")
+    rating: int | None = Field(default=None, ge=1, le=5)
+    notes: str | None = Field(default=None, max_length=10_000)
+
+
+def _candidate_options(pool: list[dict]) -> list[dict]:
+    return [
+        {
+            "scryfall_id": card["scryfall_id"],
+            "oracle_id": card["oracle_id"],
+            "name": card["name"],
+            "mana_cost": card.get("mana_cost"),
+            "cmc": card.get("cmc"),
+            "type_line": card.get("type_line"),
+            "color_identity": card.get("color_identity"),
+            "owned_quantity": card.get("owned_quantity", 0),
+            "deterministic_roles": card.get("deterministic_roles", []),
+            "structured_roles": (card.get("mechanic_profile") or {}).get("roles", []),
+            "retrieval": card.get("retrieval", {}),
+        }
+        for card in pool
+    ]
+
+
+def _require_recommendation_run(db: Session, run_id: str) -> RecommendationRun:
+    run = db.get(RecommendationRun, run_id)
+    if run is None:
+        raise HTTPException(404, detail="Recommendation run not found")
+    return run
+
+
+@app.post("/api/deckbuilding/candidates")
+def deckbuilding_candidates(body: _CandidateRequest, db: Annotated[Session, Depends(get_db)]):
+    """Return owned candidates with deterministic, transparent relevance scores."""
+    pool = _build_candidate_pool(
+        db,
+        body.query,
+        seed_names=set(body.seed_names),
+        commander_name=body.commander_name,
+        exclude_names=set(body.exclude_names),
+        limit=body.limit,
+    )
+    return {"pool_size": len(pool), "retrieval": public_score_summary(pool, body.limit)}
+
+
+@app.post("/api/deckbuilding/build")
+def deckbuilding_build(body: _BuildRequest, db: Annotated[Session, Depends(get_db)]):
+    """Reason about packages, then deterministically build from owned legal cards."""
+    if not settings.anthropic_api_key:
+        raise HTTPException(400, detail="ANTHROPIC_API_KEY not set in backend/.env")
+
+    seeds = {body.commander_name} if body.commander_name else set()
+    pool = _build_candidate_pool(
+        db, body.theme, seed_names=seeds, commander_name=body.commander_name
+    )
+
+    _log.info("Deckbuilding/build theme=%r pool_size=%s", body.theme, len(pool))
+
+    if not pool:
+        raise HTTPException(400, detail="No owned legal candidates matched the request")
+    reasoner = build_strategy_reasoner()
+    pipeline = build_deck_with_reasoning(
+        db,
+        theme=body.theme,
+        candidates=pool,
+        commander_name=body.commander_name,
+        reasoner=reasoner,
+    )
+    provenance = pipeline["result"]["reasoning_provenance"]
+    run = create_recommendation_run(
+        db,
+        query_text=body.theme,
+        requested_commander=body.commander_name,
+        provider=provenance["provider"],
+        model=provenance["model"],
+        proposal=pipeline["result"]["reasoning_proposal"],
+        optimizer=pipeline["result"]["optimizer"],
+        candidates=pool,
+    )
+    db.commit()
+
+    return {
+        **pipeline,
+        "recommendation_run_id": run.id,
+        "pool_size": len(pool),
+        "retrieval": public_score_summary(pool),
+        "candidate_options": _candidate_options(pool),
+    }
+
+
+@app.post("/api/deckbuilding/recommendations/{run_id}/validate")
+def validate_recommendation_draft(
+    run_id: str,
+    body: _DraftRequest,
+    db: Annotated[Session, Depends(get_db)],
+):
+    run = _require_recommendation_run(db, run_id)
+    candidates = candidates_for_run(run)
+    entries = [entry.model_dump() for entry in body.entries]
+    validation = validate_optimized_deck(db, candidates, entries)
+    return {"validation": validation, "decklist": format_decklist(entries)}
+
+
+@app.post("/api/deckbuilding/recommendations/{run_id}/save")
+def save_recommendation_draft(
+    run_id: str,
+    body: _SaveRecommendationRequest,
+    db: Annotated[Session, Depends(get_db)],
+):
+    run = _require_recommendation_run(db, run_id)
+    candidates = candidates_for_run(run)
+    entries = [entry.model_dump() for entry in body.entries]
+    validation = validate_optimized_deck(db, candidates, entries)
+    if not validation["valid"]:
+        raise HTTPException(400, detail={
+            "message": "Edited deck failed hard constraints",
+            "validation": validation,
+        })
+
+    commander = next(entry for entry in entries if entry["is_commander"])
+    deck = Deck(
+        name=body.deck_name.strip(),
+        format="commander",
+        status="building",
+        notes=f"Created from recommendation run {run.id}",
+        commander_scryfall_id=commander["scryfall_id"],
+        commander_oracle_id=commander["oracle_id"],
+    )
+    db.add(deck)
+    db.flush()
+    for entry in entries:
+        _merge_deck_card(
+            db,
+            deck.id,
+            entry["scryfall_id"],
+            entry["quantity"],
+            is_commander=entry["is_commander"],
+            is_sideboard=False,
+        )
+    feedback = record_recommendation_feedback(
+        db,
+        run=run,
+        outcome="saved",
+        rating=body.rating,
+        notes=body.notes or "Saved as a deck from the recommendation workspace.",
+        edited_entries=entries,
+        saved_deck_id=deck.id,
+    )
+    db.commit()
+    return {
+        "deck": get_deck(deck.id, db),
+        "validation": validation,
+        "feedback_id": feedback.id,
+    }
+
+
+@app.post("/api/deckbuilding/recommendations/{run_id}/feedback")
+def submit_recommendation_feedback(
+    run_id: str,
+    body: _RecommendationFeedbackRequest,
+    db: Annotated[Session, Depends(get_db)],
+):
+    run = _require_recommendation_run(db, run_id)
+    candidates = candidates_for_run(run)
+    allowed_ids = {card["oracle_id"] for card in candidates}
+    entries = [entry.model_dump() for entry in body.entries]
+    if any(entry["oracle_id"] not in allowed_ids for entry in entries):
+        raise HTTPException(400, detail="Feedback contains a card outside the recommendation pool")
+    feedback = record_recommendation_feedback(
+        db,
+        run=run,
+        outcome=body.outcome,
+        rating=body.rating,
+        notes=body.notes,
+        edited_entries=entries,
+    )
+    db.commit()
+    return {
+        "feedback_id": feedback.id,
+        "outcome": feedback.outcome,
+        "added_or_increased": json.loads(feedback.added_or_increased_json),
+        "removed_or_decreased": json.loads(feedback.removed_or_decreased_json),
+    }
+
+
+@app.post("/api/deckbuilding/suggest")
+def deckbuilding_suggest(body: _SuggestRequest, db: Annotated[Session, Depends(get_db)]):
+    """Suggest additions to an in-progress deck from owned cards."""
+    from app.services.claude_client import suggest_additions
+    if not settings.anthropic_api_key:
+        raise HTTPException(400, detail="ANTHROPIC_API_KEY not set in backend/.env")
+
+    existing_names = _parse_existing_deck_names(body.current_list)
+    pool = _build_candidate_pool(
+        db,
+        body.theme_hint or "",
+        seed_names=existing_names,
+        exclude_names=existing_names,
+    )
+
+    _log.info("Deckbuilding/suggest pool_size=%s", len(pool))
+
+    result = suggest_additions(body.current_list, pool, body.theme_hint)
+    return {
+        "result": result,
+        "warnings": [],
+        "pool_size": len(pool),
+        "retrieval": public_score_summary(pool),
+    }
+
+
+@app.post("/api/deckbuilding/audit")
+def deckbuilding_audit(body: _AuditRequest, db: Annotated[Session, Depends(get_db)]):
+    """Audit a complete deck and suggest improvements from owned cards."""
+    from app.services.claude_client import audit_deck
+    if not settings.anthropic_api_key:
+        raise HTTPException(400, detail="ANTHROPIC_API_KEY not set in backend/.env")
+
+    existing_names = _parse_existing_deck_names(body.decklist)
+    pool = _build_candidate_pool(
+        db, "", seed_names=existing_names, exclude_names=existing_names
+    )
+
+    _log.info("Deckbuilding/audit pool_size=%s", len(pool))
+
+    result = audit_deck(body.decklist, pool)
+    return {
+        "result": result,
+        "warnings": [],
+        "pool_size": len(pool),
+        "retrieval": public_score_summary(pool),
+    }

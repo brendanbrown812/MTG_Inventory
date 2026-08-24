@@ -8,6 +8,8 @@
   },
   "scripts": {
     "dev": "vite",
+    "typecheck": "tsc -p tsconfig.json --noEmit --incremental false",
+    "check": "npm run typecheck && vite build",
     "build": "tsc -b && vite build",
     "preview": "vite preview"
   },

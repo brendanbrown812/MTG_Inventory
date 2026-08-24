@@ -7,6 +7,9 @@ backend/mtg_inventory.db
 backend/logs/
 backend/__pycache__/
 backend/**/__pycache__/
+backend/.pytest_cache/
+backend/.pytest-tmp-*/
+backend/.venv/
 
 # Frontend
 frontend/.env
@@ -16,3 +19,4 @@ frontend/dist/
 # Python
 *.pyc
 /MTG_Inventory
+/backups/

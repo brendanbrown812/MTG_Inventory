@@ -9,8 +9,18 @@ services:
       # Include your Cloudflare Tunnel domain when you have one, e.g.:
       #   CORS_ORIGINS=https://spellbinder.yourdomain.com
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:8888}
+      APP_API_KEY: ${APP_API_KEY:-}
+      REQUIRE_AUTH: ${REQUIRE_AUTH:-true}
+      EXTERNAL_AUTH_ENABLED: ${EXTERNAL_AUTH_ENABLED:-false}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      ENRICHMENT_PROVIDER: ${ENRICHMENT_PROVIDER:-anthropic}
+      ENRICHMENT_MODEL: ${ENRICHMENT_MODEL:-claude-haiku-4-5-20251001}
+      REASONING_PROVIDER: ${REASONING_PROVIDER:-anthropic}
+      REASONING_MODEL: ${REASONING_MODEL:-claude-sonnet-4-6}
+      DECKBUILDING_MODEL: ${DECKBUILDING_MODEL:-claude-sonnet-4-6}
     volumes:
       - db_data:/data
+      - ./backups:/backups
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]

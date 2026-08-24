@@ -211,4 +211,40 @@ LICENSE / ATTRIBUTION
   trademark of Wizards of the Coast. This project is not affiliated with
   Wizards of the Coast or Scryfall.
 
+
+BACKUP & RECOVERY
+-----------------
+  Before upgrades, migrations, or bulk edits, follow:
+
+       docs\BACKUP_RECOVERY.md
+
+  The supplied tool uses SQLite's online backup API and verifies every backup.
+
+
+CARD DATA MODEL
+---------------
+  Oracle mechanics, Scryfall printings, and owned inventory are stored separately.
+  Migration details and verified preservation counts are documented at:
+
+       docs\DATA_MODEL.md
+
+
+DETERMINISTIC COMMANDER ANALYSIS
+--------------------------------
+  Saved Commander decks are checked for formal legality, owned quantities,
+  lands, mana sources, curve, and functional role coverage without an AI call.
+  Rules, thresholds, and test coverage are documented at:
+
+       docs\COMMANDER_ENGINE.md
+
+
+REMOTE ACCESS SECURITY
+----------------------
+  Before using a LAN address, Cloudflare Tunnel, or public domain, follow:
+
+       docs\SECURITY.md
+
+  A tunnel alone is not authentication. Configure APP_API_KEY or a real
+  upstream access policy before exposing the application.
+
 ================================================================================

@@ -1,0 +1,35 @@
+{
+  "version": "1.0.0",
+  "combos": [
+    {
+      "cards": ["Chatterfang, Squirrel General", "Pitiless Plunderer"],
+      "kind": "conditional_combo",
+      "explanation": "Creature deaths create Treasure, Chatterfang also creates Squirrels, and Chatterfang can sacrifice those Squirrels to continue the engine."
+    },
+    {
+      "cards": ["Sanguine Bond", "Exquisite Blood"],
+      "kind": "two_card_combo",
+      "explanation": "Either life-loss or life-gain trigger starts a mandatory loop that drains opponents."
+    },
+    {
+      "cards": ["Kiki-Jiki, Mirror Breaker", "Zealous Conscripts"],
+      "kind": "two_card_combo",
+      "explanation": "Conscripts untaps Kiki-Jiki and each new hasty Conscripts copy repeats the loop."
+    },
+    {
+      "cards": ["Deadeye Navigator", "Peregrine Drake"],
+      "kind": "mana_combo",
+      "explanation": "Blinking Peregrine Drake repeatedly untaps more lands than the blink activation costs."
+    },
+    {
+      "cards": ["Heliod, Sun-Crowned", "Walking Ballista"],
+      "kind": "conditional_combo",
+      "explanation": "With Ballista given lifelink and enough counters, damage gains life and Heliod replaces the removed counter."
+    },
+    {
+      "cards": ["Basilisk Collar", "Goblin Sharpshooter"],
+      "kind": "known_synergy",
+      "explanation": "Deathtouch makes each point of Sharpshooter damage lethal and creature deaths untap it."
+    }
+  ]
+}
