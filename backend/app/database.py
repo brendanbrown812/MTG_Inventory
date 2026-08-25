@@ -338,3 +338,60 @@ def run_migrations(eng) -> None:
                 )
             conn.execute(text("INSERT INTO schema_versions (version) VALUES (6)"))
             conn.commit()
+
+        if 7 not in applied:
+            required = {
+                "oracle_embeddings": {
+                    "id", "oracle_id", "provider", "model", "index_version",
+                    "dimensions", "source_hash", "vector", "is_current",
+                    "input_tokens", "created_at",
+                },
+                "semantic_query_embeddings": {
+                    "id", "provider", "model", "index_version", "dimensions",
+                    "source_hash", "vector", "input_tokens", "created_at",
+                },
+            }
+            for table_name, required_columns in required.items():
+                if not _table_exists(conn, table_name):
+                    raise RuntimeError(
+                        f"Migration 7 requires {table_name} to be created from model metadata"
+                    )
+                actual_columns = {
+                    row[1] for row in conn.exec_driver_sql(
+                        f"PRAGMA table_info('{table_name}')"
+                    ).fetchall()
+                }
+                missing_columns = required_columns - actual_columns
+                if missing_columns:
+                    raise RuntimeError(
+                        f"Migration 7 {table_name} is missing columns: "
+                        + ", ".join(sorted(missing_columns))
+                    )
+            conn.execute(text("INSERT INTO schema_versions (version) VALUES (7)"))
+            conn.commit()
+
+        if 8 not in applied:
+            table_name = "openai_usage_records"
+            required_columns = {
+                "id", "workflow", "model", "status", "pricing_version",
+                "estimated_max_cost_usd", "actual_cost_usd", "input_tokens",
+                "cached_input_tokens", "cache_write_tokens", "output_tokens",
+                "response_id", "error_type", "created_at", "completed_at",
+            }
+            if not _table_exists(conn, table_name):
+                raise RuntimeError(
+                    "Migration 8 requires openai_usage_records to be created from model metadata"
+                )
+            actual_columns = {
+                row[1] for row in conn.exec_driver_sql(
+                    "PRAGMA table_info('openai_usage_records')"
+                ).fetchall()
+            }
+            missing_columns = required_columns - actual_columns
+            if missing_columns:
+                raise RuntimeError(
+                    "Migration 8 openai_usage_records is missing columns: "
+                    + ", ".join(sorted(missing_columns))
+                )
+            conn.execute(text("INSERT INTO schema_versions (version) VALUES (8)"))
+            conn.commit()

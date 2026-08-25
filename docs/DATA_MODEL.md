@@ -31,6 +31,15 @@ The trial preserved 4,412 inventory lines totaling 8,730 owned cards, two decks,
 
 The same verified migration was then applied to `backend/mtg_inventory.db`. Post-migration integrity, row-count, relationship, second-startup idempotency, and API checks all passed with the same totals.
 
+## Semantic-index migration
+
+Migration 7 adds `oracle_embeddings` and `semantic_query_embeddings`. It is a
+forward-only additive migration: no collection, printing, inventory, deck, or
+deck-card table is rebuilt or modified. Startup verifies both tables and their
+required columns before recording schema version 7. The copied legacy-database
+migration test runs the migration twice, verifies prior collection/deck counts,
+checks both new tables, and runs SQLite foreign-key validation.
+
 The `backups` directory is ignored by Git and should not be committed because it contains personal collection data.
 
 ## Recommendation history

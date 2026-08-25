@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections import defaultdict
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
@@ -74,6 +75,51 @@ def validate_provider_batch(
                     f"Evidence for {card.name} is not present in Oracle text: {hook.evidence!r}"
                 )
     return tuple(actual[card.oracle_id] for card in cards)
+
+
+def partition_provider_batch(
+    cards: list[EnrichmentCard], batch: EnrichmentBatch
+) -> tuple[tuple[MechanicProfile, ...], dict[str, str]]:
+    """Keep independently valid profiles instead of losing a paid batch to one bad card."""
+    expected = {card.oracle_id: card for card in cards}
+    grouped: dict[str, list[MechanicProfile]] = defaultdict(list)
+    failures: dict[str, str] = {}
+    for profile in batch.profiles:
+        grouped[profile.oracle_id].append(profile)
+        if profile.oracle_id not in expected:
+            failures[f"extra:{profile.oracle_id}"] = "Provider returned an unexpected Oracle ID"
+
+    valid: list[MechanicProfile] = []
+    for card in cards:
+        profiles = grouped.get(card.oracle_id, [])
+        if not profiles:
+            failures[card.oracle_id] = f"Provider omitted {card.name}"
+            continue
+        if len(profiles) > 1:
+            failures[card.oracle_id] = f"Provider returned {card.name} more than once"
+            continue
+        profile = profiles[0]
+        if profile.card_name != card.name:
+            failures[card.oracle_id] = (
+                f"Provider changed card name: {profile.card_name!r} != {card.name!r}"
+            )
+            continue
+        oracle_text = _normalize_evidence(card.oracle_text or "")
+        invalid_hook = next(
+            (
+                hook for hook in profile.hooks
+                if _normalize_evidence(hook.evidence) not in oracle_text
+            ),
+            None,
+        )
+        if invalid_hook is not None:
+            failures[card.oracle_id] = (
+                f"Evidence for {card.name} is not present in Oracle text: "
+                f"{invalid_hook.evidence!r}"
+            )
+            continue
+        valid.append(profile)
+    return tuple(valid), failures
 
 
 def persist_profile_batch(

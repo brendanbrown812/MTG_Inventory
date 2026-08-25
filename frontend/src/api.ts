@@ -427,11 +427,20 @@ export type EnrichmentStatus = {
   enrichment_provider: string;
   enrichment_model: string;
   provider_configured: boolean;
-  deckbuilding_model: string;
+  paid_requests_enabled: boolean;
   model_prices: { input: number; output: number } | null;
   avg_input_tokens_per_card: number | null;
   avg_output_tokens_per_card: number | null;
   estimated_cost_all_unprofiled: number;
+  embedding_provider: string;
+  embedding_model: string;
+  embedding_dimensions: number;
+  embedding_index_version: string;
+  embedding_provider_configured: boolean;
+  embedded_cards: number;
+  unembedded_cards: number;
+  avg_embedding_tokens_per_card: number | null;
+  estimated_cost_all_unembedded: number;
 };
 
 export type EnrichmentJob = {
@@ -440,7 +449,38 @@ export type EnrichmentJob = {
   processed: number;
   total: number;
   failed?: number;
+  failed_cards?: string[];
   error?: string;
+  input_tokens?: number;
+  estimated_cost?: number;
+};
+
+export type OpenAIUsageRecord = {
+  id: string;
+  workflow: string;
+  model: string;
+  status: "reserved" | "completed" | "failed";
+  estimated_max_cost_usd: number;
+  actual_cost_usd: number | null;
+  input_tokens: number;
+  cached_input_tokens: number;
+  cache_write_tokens: number;
+  output_tokens: number;
+  created_at: string;
+};
+
+export type OpenAIUsageSummary = {
+  requests_enabled: boolean;
+  month: string;
+  monthly_budget_usd: number;
+  single_request_limit_usd: number;
+  spent_usd: number;
+  reserved_usd: number;
+  remaining_usd: number;
+  pricing_version: string;
+  record_count: number;
+  recent: OpenAIUsageRecord[];
+  notice: string;
 };
 
 export type MechanicHook = {
@@ -477,6 +517,12 @@ export async function fetchEnrichmentStatus(): Promise<EnrichmentStatus> {
   return r.json();
 }
 
+export async function fetchOpenAIUsage(): Promise<OpenAIUsageSummary> {
+  const r = await fetch(`${base}/api/openai/usage`);
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+
 export async function startScryfallBackfill(batchSize: number): Promise<{ job_id: string }> {
   const r = await fetch(`${base}/api/enrichment/backfill-scryfall`, {
     method: "POST",
@@ -497,6 +543,16 @@ export async function startStructuredEnrichment(batchSize: number): Promise<{ jo
   return r.json();
 }
 
+export async function startSemanticIndex(batchSize: number): Promise<{ job_id: string }> {
+  const r = await fetch(`${base}/api/enrichment/index-embeddings`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ batch_size: batchSize }),
+  });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+
 export async function fetchEnrichmentProgress(jobId: string): Promise<EnrichmentJob | null> {
   const r = await fetch(`${base}/api/enrichment/progress/${encodeURIComponent(jobId)}`);
   if (!r.ok) return null;
@@ -505,6 +561,47 @@ export async function fetchEnrichmentProgress(jobId: string): Promise<Enrichment
 
 export async function fetchEnrichmentSample(n = 20): Promise<MechanicProfileSample[]> {
   const r = await fetch(`${base}/api/enrichment/sample?n=${n}`);
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+
+export type QualityEvaluationCase = {
+  id: string;
+  group: "profile" | "interaction" | "retrieval" | "legality" | "construction";
+  category: string;
+  status: "passed" | "failed" | "skipped";
+  subject: string;
+  reason?: string;
+  expected?: Record<string, unknown>;
+  actual?: Record<string, unknown>;
+};
+
+export type QualityEvaluationReport = {
+  suite_version: string;
+  profile_schema_version: string;
+  taxonomy_version: string;
+  retrieval_version: string;
+  generated_at: string;
+  network_requests: number;
+  summary: {
+    total: number;
+    passed: number;
+    failed: number;
+    skipped: number;
+    coverage: number;
+    pass_rate: number | null;
+  };
+  categories: Record<string, {
+    passed: number;
+    failed: number;
+    skipped: number;
+    pass_rate: number | null;
+  }>;
+  cases: QualityEvaluationCase[];
+};
+
+export async function fetchQualityEvaluation(): Promise<QualityEvaluationReport> {
+  const r = await fetch(`${base}/api/evaluations/mtg-quality`);
   if (!r.ok) throw new Error(await r.text());
   return r.json();
 }
@@ -532,6 +629,11 @@ export type DeckbuildingResult = {
   weaknesses?: string[];
   strategic_packages?: StrategyPackageProposal[];
   reasoning_provenance?: {
+    provider: string;
+    model: string;
+    schema_version: string;
+  };
+  review_provenance?: {
     provider: string;
     model: string;
     schema_version: string;
@@ -603,6 +705,7 @@ export type RecommendationCandidateOption = {
     version: string;
     total_score: number;
     components: CandidateScoreComponents;
+    semantic?: SemanticScoreProvenance;
     reasons: string[];
   };
 };
@@ -690,7 +793,15 @@ export type CandidateScore = {
   version: string;
   total_score: number;
   components: CandidateScoreComponents;
+  semantic?: SemanticScoreProvenance;
   reasons: string[];
+};
+
+export type SemanticScoreProvenance = {
+  source: "openai_embedding" | "lexical_fallback";
+  similarity: number;
+  embedding_similarity: number | null;
+  lexical_similarity: number;
 };
 
 export type CandidateRetrievalSummary = {

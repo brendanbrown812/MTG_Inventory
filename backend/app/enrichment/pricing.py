@@ -2,6 +2,9 @@ from __future__ import annotations
 
 
 MODEL_PRICES: dict[str, dict[str, dict[str, float]]] = {
+    "openai": {
+        "gpt-5.6-luna": {"input": 0.20, "output": 1.20},
+    },
     "anthropic": {
         "claude-haiku-4-5-20251001": {"input": 0.80, "output": 4.00},
         "claude-sonnet-4-6": {"input": 3.00, "output": 15.00},

@@ -25,12 +25,15 @@ from app.models import (
     CardPrinting, Deck, DeckCard, EnrichmentStats, InventoryLine,
     MechanicProfileRecord, OracleCard, RecommendationRun,
 )
+from app.embeddings.registry import build_embedding_provider, embedding_provider_is_configured
+from app.evaluation.runner import run_local_quality_evaluation
 from app.enrichment.base import (
     EnrichmentBatch,
+    ProviderUsage,
     card_to_provider_input,
     persist_profile_batch,
+    partition_provider_batch,
     profile_from_record,
-    validate_provider_batch,
 )
 from app.enrichment.pricing import estimate_cost, get_model_prices
 from app.enrichment.registry import build_enrichment_provider, provider_is_configured
@@ -51,9 +54,17 @@ from app.schemas import (
     InventoryLineOut,
 )
 from app.services.matcher import match_new_cards
-from app.services.commander_engine import analyze_commander_deck
+from app.services.commander_engine import analyze_commander_deck, deterministic_roles
 from app.services.candidate_retrieval import public_score_summary, retrieve_owned_candidates
+from app.services.semantic_index import (
+    EMBEDDING_PRICE_PER_MILLION_TOKENS,
+    pending_card_embeddings,
+    persist_card_embedding_batch,
+    semantic_index_status,
+)
 from app.reasoning.registry import build_strategy_reasoner
+from app.review.base import parse_deck_entries, parse_deck_names
+from app.review.registry import build_deck_reviewer
 from app.services.deck_pipeline import build_deck_with_reasoning
 from app.services.deck_optimizer import format_decklist, validate_optimized_deck
 from app.services.recommendation_history import (
@@ -61,6 +72,7 @@ from app.services.recommendation_history import (
     create_recommendation_run,
     record_recommendation_feedback,
 )
+from app.services.openai_usage import openai_usage_summary
 from app.security import api_key_is_valid, has_unprotected_remote_origin, validate_auth_configuration
 from app.services.scryfall_client import (
     ScryfallClient,
@@ -1408,15 +1420,25 @@ def _run_structured_enrichment(job_id: str, batch_size: int) -> None:
 
         batch_id = str(uuid.uuid4())
         processed = 0
+        failed_cards: list[str] = []
         chunk_size = 12
 
         for i in range(0, total, chunk_size):
             chunk = cards[i : i + chunk_size]
             provider_cards = [card_to_provider_input(card) for card in chunk]
             batch = provider.enrich(provider_cards)
-            ordered_profiles = validate_provider_batch(provider_cards, batch)
-            validated_batch = EnrichmentBatch(profiles=ordered_profiles, usage=batch.usage)
-            persist_profile_batch(db, provider, validated_batch)
+            valid_profiles, failures = partition_provider_batch(provider_cards, batch)
+            if valid_profiles:
+                fraction = len(valid_profiles) / max(1, len(provider_cards))
+                valid_usage = ProviderUsage(
+                    input_tokens=round(batch.usage.input_tokens * fraction),
+                    output_tokens=round(batch.usage.output_tokens * fraction),
+                )
+                persist_profile_batch(
+                    db,
+                    provider,
+                    EnrichmentBatch(profiles=valid_profiles, usage=valid_usage),
+                )
 
             db.add(EnrichmentStats(
                 batch_id=batch_id,
@@ -1427,17 +1449,123 @@ def _run_structured_enrichment(job_id: str, batch_size: int) -> None:
             ))
             db.commit()
 
-            processed += len(chunk)
-            _update_enrichment_job(job_id, processed=processed)
+            retry_by_id = {card.oracle_id: card for card in provider_cards}
+            recovered = 0
+            retry_items = [
+                (oracle_id, reason)
+                for oracle_id, reason in failures.items()
+                if oracle_id in retry_by_id
+            ]
+            # A high failure ratio indicates a systematic schema/provider issue,
+            # not independent card defects. Never amplify one paid request into a
+            # retry storm like the original 48-card incident.
+            max_isolated_retries = min(3, max(1, len(provider_cards) // 3))
+            if len(retry_items) > max_isolated_retries:
+                failed_cards.extend(retry_by_id[oracle_id].name for oracle_id, _ in retry_items)
+                _log.error(
+                    "Enrichment retry circuit opened job_id=%s invalid=%s chunk=%s limit=%s",
+                    job_id, len(retry_items), len(provider_cards), max_isolated_retries,
+                )
+                retry_items = []
+
+            for oracle_id, reason in retry_items:
+                retry_card = retry_by_id.get(oracle_id)
+                if retry_card is None:
+                    _log.warning("Ignoring enrichment batch anomaly job_id=%s detail=%s", job_id, reason)
+                    continue
+                try:
+                    retry_batch = provider.enrich([retry_card])
+                    retry_valid, retry_failures = partition_provider_batch(
+                        [retry_card], retry_batch
+                    )
+                    db.add(EnrichmentStats(
+                        batch_id=batch_id,
+                        model=f"{provider.provider_name}:{provider.model_name}",
+                        input_tokens=retry_batch.usage.input_tokens,
+                        output_tokens=retry_batch.usage.output_tokens,
+                        cards_processed=1,
+                    ))
+                    if retry_valid:
+                        persist_profile_batch(
+                            db,
+                            provider,
+                            EnrichmentBatch(profiles=retry_valid, usage=retry_batch.usage),
+                        )
+                        recovered += 1
+                    else:
+                        failed_cards.append(retry_card.name)
+                        _log.warning(
+                            "Enrichment retry rejected job_id=%s card=%s detail=%s",
+                            job_id, retry_card.name,
+                            retry_failures.get(oracle_id, "invalid provider response"),
+                        )
+                    db.commit()
+                except Exception as retry_exc:
+                    db.rollback()
+                    failed_cards.append(retry_card.name)
+                    _log.warning(
+                        "Enrichment retry failed job_id=%s card=%s error=%s",
+                        job_id, retry_card.name, type(retry_exc).__name__, exc_info=True,
+                    )
+
+            processed += len(valid_profiles) + recovered
+            _update_enrichment_job(
+                job_id,
+                processed=processed,
+                failed=len(failed_cards),
+                failed_cards=list(failed_cards),
+            )
             _log.info(
                 "Structured enrichment chunk done job_id=%s processed=%s/%s provider=%s model=%s",
                 job_id, processed, total, provider.provider_name, provider.model_name,
             )
 
-        _update_enrichment_job(job_id, status="done")
+        _update_enrichment_job(
+            job_id,
+            status="done",
+            failed=len(failed_cards),
+            failed_cards=list(failed_cards),
+        )
     except Exception as exc:
         _update_enrichment_job(job_id, status="error", error=str(exc))
         _log.exception("Structured enrichment job failed job_id=%s", job_id)
+    finally:
+        db.close()
+
+
+def _run_semantic_index(job_id: str, batch_size: int) -> None:
+    db = SessionLocal()
+    try:
+        provider = build_embedding_provider()
+        pending = pending_card_embeddings(db, limit=batch_size)
+        total = len(pending)
+        _update_enrichment_job(job_id, total=total, processed=0, input_tokens=0)
+        processed = 0
+        input_tokens = 0
+        chunk_size = max(1, min(settings.embedding_request_batch_size, 2_048))
+        for offset in range(0, total, chunk_size):
+            chunk = pending[offset : offset + chunk_size]
+            input_tokens += persist_card_embedding_batch(db, provider, chunk)
+            db.commit()
+            processed += len(chunk)
+            _update_enrichment_job(
+                job_id,
+                processed=processed,
+                input_tokens=input_tokens,
+                estimated_cost=round(
+                    input_tokens * EMBEDDING_PRICE_PER_MILLION_TOKENS / 1_000_000,
+                    6,
+                ),
+            )
+            _log.info(
+                "Semantic index chunk done job_id=%s processed=%s/%s model=%s dimensions=%s",
+                job_id, processed, total, provider.model_name, provider.dimensions,
+            )
+        _update_enrichment_job(job_id, status="done")
+    except Exception as exc:
+        db.rollback()
+        _update_enrichment_job(job_id, status="error", error=str(exc))
+        _log.exception("Semantic indexing job failed job_id=%s", job_id)
     finally:
         db.close()
 
@@ -1489,12 +1617,19 @@ def enrichment_status(db: Annotated[Session, Depends(get_db)]):
         "enrichment_provider":        settings.enrichment_provider,
         "enrichment_model":           settings.enrichment_model,
         "provider_configured":        provider_is_configured(),
-        "deckbuilding_model":         settings.deckbuilding_model,
+        "paid_requests_enabled":      settings.openai_requests_enabled,
         "model_prices":               prices,
         "avg_input_tokens_per_card":  avg_in,
         "avg_output_tokens_per_card": avg_out,
         "estimated_cost_all_unprofiled": round(est_cost, 4),
+        **semantic_index_status(db),
     }
+
+
+@app.get("/api/openai/usage")
+def openai_usage():
+    """Return the local cost-control ledger; credentials are never included."""
+    return openai_usage_summary()
 
 
 class _ScryfallBatchRequest(BaseModel):
@@ -1503,6 +1638,10 @@ class _ScryfallBatchRequest(BaseModel):
 
 class _EnrichmentBatchRequest(BaseModel):
     batch_size: int = Field(ge=1, le=settings.max_enrichment_batch_size)
+
+
+class _EmbeddingBatchRequest(BaseModel):
+    batch_size: int = Field(ge=1, le=settings.max_embedding_batch_size)
 
 
 @app.post("/api/enrichment/backfill-scryfall")
@@ -1517,12 +1656,30 @@ def start_scryfall_backfill(body: _ScryfallBatchRequest, background_tasks: Backg
 def start_structured_enrichment(body: _EnrichmentBatchRequest, background_tasks: BackgroundTasks):
     """Create versioned structured mechanic profiles with the configured provider."""
     if not provider_is_configured():
+        if settings.enrichment_provider == "openai" and not settings.openai_requests_enabled:
+            detail = "Paid OpenAI requests are disabled by OPENAI_REQUESTS_ENABLED"
+        else:
+            detail = f"Enrichment provider {settings.enrichment_provider!r} is not configured"
         raise HTTPException(
             400,
-            detail=f"Enrichment provider {settings.enrichment_provider!r} is not configured",
+            detail=detail,
         )
     job_id = _start_enrichment_job("structured_mechanic_profiles", body.batch_size)
     background_tasks.add_task(_run_structured_enrichment, job_id, body.batch_size)
+    return {"job_id": job_id}
+
+
+@app.post("/api/enrichment/index-embeddings")
+def start_semantic_index(body: _EmbeddingBatchRequest, background_tasks: BackgroundTasks):
+    """Build or refresh the persistent Oracle-card semantic index."""
+    if not embedding_provider_is_configured():
+        if settings.embedding_provider == "openai" and not settings.openai_requests_enabled:
+            detail = "Paid OpenAI requests are disabled by OPENAI_REQUESTS_ENABLED"
+        else:
+            detail = f"Embedding provider {settings.embedding_provider!r} is not configured"
+        raise HTTPException(400, detail=detail)
+    job_id = _start_enrichment_job("semantic_embeddings", body.batch_size)
+    background_tasks.add_task(_run_semantic_index, job_id, body.batch_size)
     return {"job_id": job_id}
 
 
@@ -1569,6 +1726,12 @@ def enrichment_sample(
     ]
 
 
+@app.get("/api/evaluations/mtg-quality")
+def mtg_quality_evaluation(db: Annotated[Session, Depends(get_db)]):
+    """Run the versioned MTG quality gate locally without provider requests."""
+    return run_local_quality_evaluation(db)
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Deckbuilding endpoints
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1598,7 +1761,7 @@ def _build_candidate_pool(
 
 def _validate_decklist(db: Session, decklist_text: str) -> list[str]:
     """
-    Deterministic post-processing checks on a Claude-returned decklist.
+    Deterministic checks for a pasted or externally generated decklist.
     Returns a list of warning strings (empty = clean).
     """
     warnings: list[str] = []
@@ -1674,15 +1837,40 @@ def _validate_decklist(db: Session, decklist_text: str) -> list[str]:
 
 
 def _parse_existing_deck_names(decklist_text: str) -> set[str]:
-    names = set()
-    for line in decklist_text.strip().splitlines():
-        line = line.strip()
-        m = _QTY_NAME_RE.match(line)
-        if m:
-            names.add(m.group(2).strip().lower())
-        elif line:
-            names.add(line.lower())
-    return names
+    return {name.casefold() for name in parse_deck_names(decklist_text)}
+
+
+def _existing_deck_context(db: Session, decklist_text: str) -> list[dict]:
+    """Resolve pasted names against local Oracle cards, including Moxfield suffixes."""
+    oracle_cards = db.query(OracleCard).all()
+    canonical = {card.name.casefold(): card for card in oracle_cards}
+    ordered_names = sorted(canonical, key=len, reverse=True)
+    quantities: Counter[str] = Counter()
+    for quantity, raw_name in parse_deck_entries(decklist_text):
+        normalized = raw_name.casefold()
+        card = canonical.get(normalized)
+        if card is None:
+            match = next(
+                (name for name in ordered_names if normalized.startswith(name + " (") or normalized.startswith(name + " [")),
+                None,
+            )
+            card = canonical.get(match) if match else None
+        if card is None:
+            continue
+        quantities[card.oracle_id] += quantity
+    by_id = {card.oracle_id: card for card in oracle_cards}
+    return [
+        {
+            "oracle_id": oracle_id,
+            "name": by_id[oracle_id].name,
+            "quantity": quantity,
+            "cmc": by_id[oracle_id].cmc,
+            "type_line": by_id[oracle_id].type_line,
+            "oracle_text": by_id[oracle_id].oracle_text,
+            "deterministic_roles": sorted(deterministic_roles(by_id[oracle_id])),
+        }
+        for oracle_id, quantity in quantities.items()
+    ]
 
 
 class _BuildRequest(BaseModel):
@@ -1774,9 +1962,6 @@ def deckbuilding_candidates(body: _CandidateRequest, db: Annotated[Session, Depe
 @app.post("/api/deckbuilding/build")
 def deckbuilding_build(body: _BuildRequest, db: Annotated[Session, Depends(get_db)]):
     """Reason about packages, then deterministically build from owned legal cards."""
-    if not settings.anthropic_api_key:
-        raise HTTPException(400, detail="ANTHROPIC_API_KEY not set in backend/.env")
-
     seeds = {body.commander_name} if body.commander_name else set()
     pool = _build_candidate_pool(
         db, body.theme, seed_names=seeds, commander_name=body.commander_name
@@ -1914,11 +2099,8 @@ def submit_recommendation_feedback(
 @app.post("/api/deckbuilding/suggest")
 def deckbuilding_suggest(body: _SuggestRequest, db: Annotated[Session, Depends(get_db)]):
     """Suggest additions to an in-progress deck from owned cards."""
-    from app.services.claude_client import suggest_additions
-    if not settings.anthropic_api_key:
-        raise HTTPException(400, detail="ANTHROPIC_API_KEY not set in backend/.env")
-
-    existing_names = _parse_existing_deck_names(body.current_list)
+    existing_cards = _existing_deck_context(db, body.current_list)
+    existing_names = {card["name"].casefold() for card in existing_cards}
     pool = _build_candidate_pool(
         db,
         body.theme_hint or "",
@@ -1928,9 +2110,17 @@ def deckbuilding_suggest(body: _SuggestRequest, db: Annotated[Session, Depends(g
 
     _log.info("Deckbuilding/suggest pool_size=%s", len(pool))
 
-    result = suggest_additions(body.current_list, pool, body.theme_hint)
+    reviewer = build_deck_reviewer()
+    result = reviewer.suggest(body.current_list, pool, body.theme_hint, existing_cards)
     return {
-        "result": result,
+        "result": {
+            **result.model_dump(mode="json"),
+            "review_provenance": {
+                "provider": reviewer.provider_name,
+                "model": reviewer.model_name,
+                "schema_version": result.schema_version,
+            },
+        },
         "warnings": [],
         "pool_size": len(pool),
         "retrieval": public_score_summary(pool),
@@ -1940,21 +2130,26 @@ def deckbuilding_suggest(body: _SuggestRequest, db: Annotated[Session, Depends(g
 @app.post("/api/deckbuilding/audit")
 def deckbuilding_audit(body: _AuditRequest, db: Annotated[Session, Depends(get_db)]):
     """Audit a complete deck and suggest improvements from owned cards."""
-    from app.services.claude_client import audit_deck
-    if not settings.anthropic_api_key:
-        raise HTTPException(400, detail="ANTHROPIC_API_KEY not set in backend/.env")
-
-    existing_names = _parse_existing_deck_names(body.decklist)
+    existing_cards = _existing_deck_context(db, body.decklist)
+    existing_names = {card["name"].casefold() for card in existing_cards}
     pool = _build_candidate_pool(
         db, "", seed_names=existing_names, exclude_names=existing_names
     )
 
     _log.info("Deckbuilding/audit pool_size=%s", len(pool))
 
-    result = audit_deck(body.decklist, pool)
+    reviewer = build_deck_reviewer()
+    result = reviewer.audit(body.decklist, pool, existing_cards)
     return {
-        "result": result,
-        "warnings": [],
+        "result": {
+            **result.model_dump(mode="json"),
+            "review_provenance": {
+                "provider": reviewer.provider_name,
+                "model": reviewer.model_name,
+                "schema_version": result.schema_version,
+            },
+        },
+        "warnings": _validate_decklist(db, body.decklist),
         "pool_size": len(pool),
         "retrieval": public_score_summary(pool),
     }

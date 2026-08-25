@@ -35,6 +35,9 @@ TECH STACK
     - Scryfall API (https://api.scryfall.com) — card Oracle text, images,
       legalities, color identity, etc. Respect their rate limits on very
       large imports.
+    - OpenAI API (optional) — strategic reasoning over a bounded pool of
+      owned cards. Without a key, deck construction uses the local
+      deterministic fallback.
 
 
 PREREQUISITES
@@ -123,6 +126,13 @@ DATA & CONFIGURATION
     current working directory when you start uvicorn (usually "backend").
     Override with DATABASE_URL in environment if needed.
 
+  - OpenAI reasoning: add OPENAI_API_KEY to the ignored root .env file and
+    leave REASONING_PROVIDER=openai. Paid calls remain disabled until
+    OPENAI_REQUESTS_ENABLED=true. The key is read only by the backend. See
+    docs\reasoning-and-optimizer.md, docs\DECK_REVIEW.md,
+    docs\STRUCTURED_ENRICHMENT.md, and docs\EVALUATION.md for provider
+    settings and the zero-network quality gate.
+
 
 MANABOX CSV IMPORT
 ------------------
@@ -197,6 +207,12 @@ TROUBLESHOOTING
   API errors on import
     - Check internet; Scryfall must be reachable.
 
+  "No module named 'openai'" or another missing Python package
+    - The backend environment predates a requirements update. From backend run:
+        .venv\Scripts\python.exe -m pip install -r requirements.txt
+    - Restart Spellbinder after installation. The launcher now checks required
+      imports before opening the API and UI windows.
+
   "Python was not found"
     - Install Python and ensure "py" or "python" is on PATH.
 
@@ -236,6 +252,16 @@ DETERMINISTIC COMMANDER ANALYSIS
   Rules, thresholds, and test coverage are documented at:
 
        docs\COMMANDER_ENGINE.md
+
+
+OPENAI COST CONTROLS
+--------------------
+  Paid requests stay locked unless OPENAI_REQUESTS_ENABLED=true. Spellbinder
+  reserves estimated request cost before every OpenAI call, enforces local
+  monthly/per-request caps, and shows reconciled token usage on the Enrich page.
+  Setup, limitations, and the optional first paid canary are documented at:
+
+       docs\OPENAI_COST_CONTROLS.md
 
 
 REMOTE ACCESS SECURITY

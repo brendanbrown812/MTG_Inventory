@@ -56,6 +56,31 @@ if not defined PYTHON_MODE (
   goto :fail
 )
 
+if "%PYTHON_MODE%"=="venv" (
+  "%ROOT%backend\.venv\Scripts\python.exe" -c "import fastapi, uvicorn, sqlalchemy, pydantic, httpx, openai" >nul 2>&1
+) else if "%PYTHON_MODE%"=="py" (
+  py -3 -c "import fastapi, uvicorn, sqlalchemy, pydantic, httpx, openai" >nul 2>&1
+) else (
+  python -c "import fastapi, uvicorn, sqlalchemy, pydantic, httpx, openai" >nul 2>&1
+)
+if errorlevel 1 (
+  echo [ERROR] One or more backend Python dependencies are missing.
+  echo.
+  if "%PYTHON_MODE%"=="venv" (
+    echo         Run:
+    echo           "%ROOT%backend\.venv\Scripts\python.exe" -m pip install -r "%ROOT%backend\requirements.txt"
+  ) else if "%PYTHON_MODE%"=="py" (
+    echo         Run:
+    echo           cd /d "%ROOT%backend"
+    echo           py -3 -m pip install -r requirements.txt
+  ) else (
+    echo         Run:
+    echo           cd /d "%ROOT%backend"
+    echo           python -m pip install -r requirements.txt
+  )
+  goto :fail
+)
+
 netstat -ano 2>nul | findstr "LISTENING" | findstr /C:":8000 " >nul
 if not errorlevel 1 (
   echo [ERROR] Port 8000 is already in use. The API cannot start twice.

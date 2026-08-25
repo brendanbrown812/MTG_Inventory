@@ -21,6 +21,9 @@ from app.reasoning.base import (
     StrategyReasoner,
     validate_reasoning_proposal,
 )
+from app.reasoning.deterministic_provider import DeterministicStrategyReasoner
+from app.reasoning.openai_provider import OpenAIStrategyReasoner
+from app.reasoning.registry import FallbackStrategyReasoner, build_strategy_reasoner
 from app.services.deck_optimizer import optimize_commander_deck, validate_optimized_deck
 
 
@@ -116,6 +119,15 @@ class FakeReasoner:
         return validate_reasoning_proposal(candidates, _proposal())
 
 
+@dataclass
+class FailingReasoner:
+    provider_name: str = "unavailable"
+    model_name: str = "failure-fixture"
+
+    def propose(self, theme, candidates, commander_name):
+        raise RuntimeError("simulated provider outage")
+
+
 def test_reasoning_contract_is_provider_neutral_and_has_no_decklist_field() -> None:
     assert isinstance(FakeReasoner(), StrategyReasoner)
     with pytest.raises(ValidationError):
@@ -134,6 +146,172 @@ def test_reasoning_proposal_rejects_hallucinated_cards() -> None:
     })
     with pytest.raises(ValueError, match="outside the candidate pool"):
         validate_reasoning_proposal([{"name": "Forest"}], proposal)
+
+
+def test_deterministic_reasoner_returns_bounded_repeatable_packages() -> None:
+    with SessionLocal() as db:
+        pool = _complete_pool(db)
+        reasoner = DeterministicStrategyReasoner()
+
+        first = reasoner.propose("Elf value strategy", pool, "Verdant Captain")
+        second = reasoner.propose("Elf value strategy", pool, "Verdant Captain")
+
+        assert first == second
+        assert first.recommended_commander == "Verdant Captain"
+        assert {package.name for package in first.packages} >= {
+            "Mana development", "Card flow", "Interaction", "Resilience",
+        }
+        candidate_names = {card["name"] for card in pool}
+        assert all(
+            name in candidate_names
+            for package in first.packages
+            for name in package.card_names
+        )
+        assert set(first.card_priorities) <= candidate_names
+
+
+def test_optional_reasoner_failure_uses_deterministic_fallback() -> None:
+    with SessionLocal() as db:
+        pool = _complete_pool(db)
+        reasoner = FallbackStrategyReasoner(
+            FailingReasoner(),
+            DeterministicStrategyReasoner(),
+        )
+
+        proposal = reasoner.propose("Elf value strategy", pool, "Verdant Captain")
+
+        assert proposal.recommended_commander == "Verdant Captain"
+        assert reasoner.provider_name == "deterministic"
+        assert reasoner.model_name == "rules-v1"
+
+
+def test_openai_reasoner_uses_responses_structured_output_and_closed_pool() -> None:
+    captured: dict = {}
+
+    class FakeResponses:
+        def parse(self, **kwargs):
+            captured["request"] = kwargs
+            return type("Response", (), {
+                "id": "resp_test",
+                "output_parsed": _proposal(),
+                "usage": type("Usage", (), {
+                    "input_tokens": 123,
+                    "output_tokens": 45,
+                    "input_tokens_details": type("Details", (), {"cached_tokens": 20})(),
+                })(),
+            })()
+
+    class FakeClient:
+        responses = FakeResponses()
+
+    def client_factory(**kwargs):
+        captured["client"] = kwargs
+        return FakeClient()
+
+    with SessionLocal() as db:
+        pool = _complete_pool(db)
+        # The usage ledger intentionally commits its reservation before the
+        # network call; release this fixture's SQLite write transaction first.
+        db.commit()
+        reasoner = OpenAIStrategyReasoner(
+            api_key="secret-test-key",
+            model="gpt-5.6-luna",
+            reasoning_effort="low",
+            max_output_tokens=3210,
+            timeout_seconds=17,
+            max_retries=3,
+            client_factory=client_factory,
+        )
+
+        proposal = reasoner.propose("Elf value strategy", pool, "Verdant Captain")
+
+    assert proposal == _proposal()
+    assert captured["client"] == {
+        "api_key": "secret-test-key",
+        "timeout": 17,
+        "max_retries": 3,
+    }
+    request = captured["request"]
+    assert request["model"] == "gpt-5.6-luna"
+    assert request["text_format"] is ReasoningProposal
+    assert request["reasoning"] == {"effort": "low"}
+    assert request["max_output_tokens"] == 3210
+    assert request["store"] is False
+    input_payload = json.loads(request["input"])
+    assert input_payload["candidate_count"] == len(pool)
+    assert {card["name"] for card in input_payload["candidates"]} == {
+        card["name"] for card in pool
+    }
+    assert "output_schema" not in input_payload
+
+
+def test_openai_configuration_without_key_falls_back_locally(monkeypatch) -> None:
+    from app.config import settings
+    monkeypatch.setattr(settings, "openai_requests_enabled", True)
+    monkeypatch.setattr(settings, "reasoning_provider", "openai")
+    monkeypatch.setattr(settings, "reasoning_model", "test-openai-model")
+    monkeypatch.setattr(settings, "openai_api_key", "")
+
+    reasoner = build_strategy_reasoner()
+
+    assert reasoner.provider_name == "deterministic"
+    assert reasoner.model_name == "rules-v1"
+
+
+def test_openai_configuration_stays_local_until_explicitly_enabled(monkeypatch) -> None:
+    from app.config import settings
+    monkeypatch.setattr(settings, "openai_requests_enabled", False)
+    monkeypatch.setattr(settings, "reasoning_provider", "openai")
+    monkeypatch.setattr(settings, "reasoning_model", "gpt-5.6-luna")
+    monkeypatch.setattr(settings, "openai_api_key", "secret-test-key")
+
+    reasoner = build_strategy_reasoner()
+
+    assert reasoner.provider_name == "deterministic"
+    assert reasoner.model_name == "rules-v1"
+
+
+def test_openai_configuration_builds_guarded_provider(monkeypatch) -> None:
+    from app.config import settings
+    monkeypatch.setattr(settings, "openai_requests_enabled", True)
+    monkeypatch.setattr(settings, "reasoning_provider", "openai")
+    monkeypatch.setattr(settings, "reasoning_model", "test-openai-model")
+    monkeypatch.setattr(settings, "reasoning_effort", "low")
+    monkeypatch.setattr(settings, "reasoning_max_output_tokens", 2500)
+    monkeypatch.setattr(settings, "openai_timeout_seconds", 30)
+    monkeypatch.setattr(settings, "openai_max_retries", 1)
+    monkeypatch.setattr(settings, "openai_api_key", "secret-test-key")
+
+    reasoner = build_strategy_reasoner()
+
+    assert isinstance(reasoner, FallbackStrategyReasoner)
+    assert reasoner.provider_name == "openai"
+    assert reasoner.model_name == "test-openai-model"
+
+
+def test_anthropic_configuration_without_key_falls_back_locally(monkeypatch) -> None:
+    from app.config import settings
+    monkeypatch.setattr(settings, "reasoning_provider", "anthropic")
+    monkeypatch.setattr(settings, "reasoning_model", "optional-model")
+    monkeypatch.setattr(settings, "anthropic_api_key", "")
+
+    reasoner = build_strategy_reasoner()
+
+    assert reasoner.provider_name == "deterministic"
+    assert reasoner.model_name == "rules-v1"
+
+
+def test_deterministic_reasoner_bounds_long_theme_text() -> None:
+    with SessionLocal() as db:
+        pool = _complete_pool(db)
+        proposal = DeterministicStrategyReasoner().propose(
+            "deathtouch " * 300,
+            pool,
+            "Verdant Captain",
+        )
+
+        assert len(proposal.strategy_summary) <= 2_000
+        assert all(len(package.purpose) <= 500 for package in proposal.packages)
 
 
 def test_optimizer_assembles_exact_owned_legal_singleton_deck_and_keeps_package() -> None:
@@ -258,3 +436,29 @@ def test_build_endpoint_uses_reasoner_for_packages_but_optimizer_for_deck(
         commander_entry = next(entry for entry in draft_entries if entry["is_commander"])
         preference = db.get(RecommendationCardPreference, commander_entry["oracle_id"])
         assert preference.accepted_count == 1
+
+
+def test_build_endpoint_works_without_anthropic_key(client, monkeypatch) -> None:
+    with SessionLocal() as db:
+        _complete_pool(db)
+        db.commit()
+
+    from app.config import settings
+    monkeypatch.setattr(settings, "anthropic_api_key", "")
+    monkeypatch.setattr(settings, "reasoning_provider", "deterministic")
+    monkeypatch.setattr(settings, "reasoning_model", "rules-v1")
+
+    response = client.post("/api/deckbuilding/build", json={
+        "theme": "Elf value strategy",
+        "commander_name": "Verdant Captain",
+    })
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["result"]["reasoning_provenance"] == {
+        "provider": "deterministic",
+        "model": "rules-v1",
+        "schema_version": "1.0.0",
+    }
+    assert payload["result"]["optimizer"]["validation"]["valid"] is True
+    assert payload["recommendation_run_id"]

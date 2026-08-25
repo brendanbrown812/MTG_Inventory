@@ -18,6 +18,7 @@ os.environ["CORS_ORIGINS"] = "http://localhost:5173"
 os.environ.pop("APP_API_KEY", None)
 os.environ.pop("REQUIRE_AUTH", None)
 os.environ.pop("EXTERNAL_AUTH_ENABLED", None)
+os.environ.pop("OPENAI_API_KEY", None)
 
 from app.config import settings  # noqa: E402
 from app.database import Base, SessionLocal, engine  # noqa: E402
@@ -39,6 +40,7 @@ def clean_database() -> Iterator[None]:
     _manabox_import_progress.clear()
     _text_import_progress.clear()
     settings.app_api_key = ""
+    settings.openai_requests_enabled = False
     yield
 
 

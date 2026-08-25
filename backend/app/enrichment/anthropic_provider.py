@@ -6,7 +6,6 @@ from app.enrichment.base import (
     EnrichmentBatch,
     EnrichmentCard,
     ProviderUsage,
-    validate_provider_batch,
 )
 from app.mechanics.profile import MechanicProfile
 
@@ -80,5 +79,4 @@ class AnthropicEnrichmentProvider:
                 output_tokens=response.usage.output_tokens,
             ),
         )
-        ordered = validate_provider_batch(cards, batch)
-        return EnrichmentBatch(profiles=ordered, usage=batch.usage)
+        return batch

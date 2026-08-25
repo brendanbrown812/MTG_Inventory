@@ -1,6 +1,6 @@
 from datetime import UTC, datetime
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy import LargeBinary, Boolean, DateTime, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -32,6 +32,9 @@ class OracleCard(Base):
 
     printings: Mapped[list["CardPrinting"]] = relationship(back_populates="oracle")
     mechanic_profiles: Mapped[list["MechanicProfileRecord"]] = relationship(
+        back_populates="oracle", cascade="all, delete-orphan"
+    )
+    semantic_embeddings: Mapped[list["OracleEmbeddingRecord"]] = relationship(
         back_populates="oracle", cascade="all, delete-orphan"
     )
 
@@ -203,6 +206,87 @@ class MechanicProfileRecord(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
 
     oracle: Mapped[OracleCard] = relationship(back_populates="mechanic_profiles")
+
+
+class OracleEmbeddingRecord(Base):
+    """Compact, versioned vector for an Oracle card's current mechanics text."""
+
+    __tablename__ = "oracle_embeddings"
+    __table_args__ = (
+        Index("ix_oracle_embeddings_current", "oracle_id", "is_current"),
+        Index(
+            "ix_oracle_embeddings_configuration",
+            "provider", "model", "index_version", "dimensions", "is_current",
+        ),
+        UniqueConstraint(
+            "oracle_id", "provider", "model", "index_version", "dimensions", "source_hash",
+            name="uq_oracle_embedding_content",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    oracle_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("oracle_cards.oracle_id"), index=True
+    )
+    provider: Mapped[str] = mapped_column(String(50))
+    model: Mapped[str] = mapped_column(String(200))
+    index_version: Mapped[str] = mapped_column(String(20))
+    dimensions: Mapped[int] = mapped_column(Integer)
+    source_hash: Mapped[str] = mapped_column(String(64))
+    vector: Mapped[bytes] = mapped_column(LargeBinary)
+    is_current: Mapped[bool] = mapped_column(Boolean, default=True)
+    input_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+
+    oracle: Mapped[OracleCard] = relationship(back_populates="semantic_embeddings")
+
+
+class SemanticQueryEmbedding(Base):
+    """Persistent cache that avoids rebilling identical retrieval requests."""
+
+    __tablename__ = "semantic_query_embeddings"
+    __table_args__ = (
+        UniqueConstraint(
+            "provider", "model", "index_version", "dimensions", "source_hash",
+            name="uq_semantic_query_embedding",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    provider: Mapped[str] = mapped_column(String(50))
+    model: Mapped[str] = mapped_column(String(200))
+    index_version: Mapped[str] = mapped_column(String(20))
+    dimensions: Mapped[int] = mapped_column(Integer)
+    source_hash: Mapped[str] = mapped_column(String(64), index=True)
+    vector: Mapped[bytes] = mapped_column(LargeBinary)
+    input_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+
+
+class OpenAIUsageRecord(Base):
+    """Local reservation and actual usage ledger for paid OpenAI requests."""
+
+    __tablename__ = "openai_usage_records"
+    __table_args__ = (
+        Index("ix_openai_usage_month", "created_at", "status"),
+        Index("ix_openai_usage_workflow", "workflow", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    workflow: Mapped[str] = mapped_column(String(50))
+    model: Mapped[str] = mapped_column(String(200))
+    status: Mapped[str] = mapped_column(String(20), default="reserved")
+    pricing_version: Mapped[str] = mapped_column(String(20))
+    estimated_max_cost_usd: Mapped[float] = mapped_column(Float)
+    actual_cost_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    input_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    cached_input_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    cache_write_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    output_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    response_id: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    error_type: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 class RecommendationRun(Base):

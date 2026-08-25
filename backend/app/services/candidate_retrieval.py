@@ -28,9 +28,12 @@ from app.models import (
     RecommendationCardPreference,
 )
 from app.services.commander_engine import deterministic_roles
+from app.embeddings.base import cosine_similarity
+from app.logging_setup import get_logger
+from app.services.semantic_index import current_card_vectors, get_or_create_query_vector
 
 
-RETRIEVAL_VERSION = "1.0.0"
+RETRIEVAL_VERSION = "1.1.0"
 DEFAULT_LIMIT = 200
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
 _CORE_ROLES = {
@@ -48,6 +51,7 @@ _DETERMINISTIC_ROLE_MAP = {
     "counterspells": "counterspell",
     "tutors": "tutor",
 }
+_log = get_logger(".candidate_retrieval")
 
 
 @dataclass(frozen=True)
@@ -222,6 +226,7 @@ def retrieve_owned_candidates(
     commander_name: str | None = None,
     exclude_names: set[str] | None = None,
     limit: int = DEFAULT_LIMIT,
+    allow_remote_embeddings: bool = True,
 ) -> list[dict]:
     """Rank owned Commander-legal cards with transparent deterministic components."""
     seed_names = {name.casefold() for name in (seed_names or set())}
@@ -312,9 +317,24 @@ def retrieve_owned_candidates(
             + [part for role in mapped_deterministic_roles for part in role.split("_")]
         )
 
-    semantic_scores = _tfidf_cosines(
+    lexical_scores = _tfidf_cosines(
         _semantic_terms(" ".join(query_parts)), documents
     )
+    candidate_ids = [oracle.oracle_id for _, oracle, _, _, _, _ in candidates]
+    stored_vectors = current_card_vectors(db, candidate_ids)
+    query_vector = None
+    if stored_vectors:
+        try:
+            query_vector = get_or_create_query_vector(
+                db,
+                " ".join(query_parts),
+                allow_provider_request=allow_remote_embeddings,
+            )
+        except Exception:
+            # Retrieval must remain available when the provider or network is
+            # temporarily unavailable. The deterministic lexical path remains
+            # visible in the returned provenance.
+            _log.exception("Semantic query embedding failed; using lexical fallback")
     preference_by_oracle = {
         preference.oracle_id: preference
         for preference in db.query(RecommendationCardPreference).filter(
@@ -332,7 +352,7 @@ def retrieve_owned_candidates(
     for (
         printing, oracle, profile, quantity, raw_deterministic_roles,
         mapped_deterministic_roles,
-    ), cosine in zip(candidates, semantic_scores):
+    ), lexical_cosine in zip(candidates, lexical_scores):
         roles = ({role.value for role in profile.roles} if profile else set()) | mapped_deterministic_roles
         hooks = profile.hooks if profile else []
         mechanics = {hook.mechanic.value for hook in hooks}
@@ -376,9 +396,22 @@ def retrieve_owned_candidates(
 
         combo_score, combo_reasons = _known_combo_score(oracle.name, seed_names)
         reasons.extend(combo_reasons)
-        semantic_score = 25.0 * cosine
+        card_vector = stored_vectors.get(oracle.oracle_id)
+        embedding_cosine = (
+            cosine_similarity(query_vector, card_vector)
+            if query_vector is not None and card_vector is not None
+            else None
+        )
+        semantic_source = "openai_embedding" if embedding_cosine is not None else "lexical_fallback"
+        semantic_similarity = (
+            max(0.0, embedding_cosine)
+            if embedding_cosine is not None
+            else lexical_cosine
+        )
+        semantic_score = 25.0 * semantic_similarity
         if semantic_score >= 2:
-            reasons.append(f"Semantic MTG concept similarity: {cosine:.3f}")
+            label = "OpenAI embedding" if embedding_cosine is not None else "Lexical MTG concept"
+            reasons.append(f"{label} similarity: {semantic_similarity:.3f}")
 
         universal_score = 0.0
         if profile and profile.universal_utility.tier is UniversalTier.broad:
@@ -436,6 +469,14 @@ def retrieve_owned_candidates(
                 "version": RETRIEVAL_VERSION,
                 "total_score": round(total, 4),
                 "components": {key: round(value, 4) for key, value in components.items()},
+                "semantic": {
+                    "source": semantic_source,
+                    "similarity": round(semantic_similarity, 6),
+                    "embedding_similarity": (
+                        round(embedding_cosine, 6) if embedding_cosine is not None else None
+                    ),
+                    "lexical_similarity": round(lexical_cosine, 6),
+                },
                 "reasons": list(dict.fromkeys(reasons)),
             },
         })

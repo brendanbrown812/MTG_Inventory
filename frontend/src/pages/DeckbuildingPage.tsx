@@ -454,6 +454,17 @@ function ResultPanel({ resp }: { resp: DeckbuildingResponse }) {
         </div>
       )}
 
+      {result.review_provenance && (
+        <div className="rounded-xl border border-white/5 bg-ink-800/50 px-4 py-3 text-xs text-stone-400">
+          Review produced by <span className="font-mono text-stone-300">
+            {result.review_provenance.provider}:{result.review_provenance.model}
+          </span>
+          {result.review_provenance.provider === "deterministic" && (
+            <span> · paid model calls are disabled or unavailable</span>
+          )}
+        </div>
+      )}
+
       {result.optimizer && result.optimizer.package_report.length > 0 && (
         <Section title="Strategic packages">
           <div className="grid gap-2 sm:grid-cols-2">

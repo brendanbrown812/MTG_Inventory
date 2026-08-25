@@ -145,6 +145,20 @@ def test_legacy_migration_separates_oracle_printings_and_preserves_data(tmp_path
             assert conn.execute(text(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=:name"
             ), {"name": table_name}).scalar_one() == 1
+        assert conn.execute(text(
+            "SELECT COUNT(*) FROM schema_versions WHERE version=7"
+        )).scalar_one() == 1
+        for table_name in ("oracle_embeddings", "semantic_query_embeddings"):
+            assert conn.execute(text(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=:name"
+            ), {"name": table_name}).scalar_one() == 1
+        assert conn.execute(text(
+            "SELECT COUNT(*) FROM schema_versions WHERE version=8"
+        )).scalar_one() == 1
+        assert conn.execute(text(
+            "SELECT COUNT(*) FROM sqlite_master "
+            "WHERE type='table' AND name='openai_usage_records'"
+        )).scalar_one() == 1
         assert conn.exec_driver_sql("PRAGMA foreign_key_check").fetchall() == []
         assert {row[2] for row in conn.exec_driver_sql(
             "PRAGMA foreign_key_list('inventory_lines')"

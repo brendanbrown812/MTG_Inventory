@@ -30,6 +30,15 @@ def test_evaluation_suite_covers_required_categories() -> None:
     }
 
 
+def test_evaluation_suite_covers_full_pipeline_groups() -> None:
+    suite = _suite()
+    assert len(suite["profile_expectations"]) >= 5
+    assert len(suite["interaction_expectations"]) >= 6
+    assert len(suite["retrieval_expectations"]) >= 4
+    assert len(suite["construction_expectations"]) >= 1
+    assert len(suite["legality_expectations"]) >= 3
+
+
 def test_golden_profiles_are_schema_valid_and_meet_expectations() -> None:
     suite = _suite()
     profiles = {

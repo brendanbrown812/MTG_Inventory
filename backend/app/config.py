@@ -23,24 +23,48 @@ class Settings(BaseSettings):
     max_ai_text_chars: int = 100_000
     max_scryfall_batch_size: int = 5_000
     max_enrichment_batch_size: int = 2_000
+    max_embedding_batch_size: int = 5_000
 
-    # Set ANTHROPIC_API_KEY in backend/.env
+    # Provider credentials are loaded from the environment and must never be
+    # committed. OpenAI is the default for every model-assisted stage;
+    # Anthropic remains available only as an explicitly selected provider.
+    openai_api_key: str = ""
     anthropic_api_key: str = ""
 
-    # Structured mechanic enrichment is provider-neutral. The first adapter
-    # uses Anthropic, while storage and downstream consumers do not.
-    enrichment_provider: str = "anthropic"
-    enrichment_model: str = "claude-haiku-4-5-20251001"
+    # Structured mechanic enrichment is provider-neutral. OpenAI Luna creates
+    # the default profiles; storage and downstream consumers remain portable.
+    enrichment_provider: str = "openai"
+    enrichment_model: str = "gpt-5.6-luna"
+    enrichment_reasoning_effort: str = "low"
+    enrichment_max_output_tokens_per_card: int = 900
+
+    # Semantic retrieval uses a persistent, versioned Oracle-card index. The
+    # smaller vector size keeps a personal SQLite database compact while
+    # retaining the text-embedding-3 model's semantic signal.
+    embedding_provider: str = "openai"
+    embedding_model: str = "text-embedding-3-small"
+    embedding_dimensions: int = 512
+    embedding_request_batch_size: int = 100
 
     # Strategic reasoning proposes bounded packages; deterministic code builds
-    # and validates the actual deck.
-    reasoning_provider: str = "anthropic"
-    reasoning_model: str = "claude-sonnet-4-6"
-
-    # Claude model for deck generation (reasoning — Sonnet is the right balance).
-    # To switch: set DECKBUILDING_MODEL=<model> in backend/.env and restart.
-    # Options (Aug 2025): claude-haiku-4-5-20251001, claude-sonnet-4-6, claude-opus-4-7
-    deckbuilding_model: str = "claude-sonnet-4-6"
+    # and validates the actual deck. Missing keys and provider failures fall
+    # back to the local rules provider.
+    openai_requests_enabled: bool = False
+    # Local safety rails. These do not replace the OpenAI project budget, but
+    # they block this application before a request is sent.
+    openai_monthly_budget_usd: float = 1.00
+    openai_single_request_limit_usd: float = 0.10
+    reasoning_provider: str = "openai"
+    reasoning_model: str = "gpt-5.6-luna"
+    reasoning_effort: str = "medium"
+    reasoning_max_output_tokens: int = 6_000
+    review_provider: str = "openai"
+    review_model: str = "gpt-5.6-luna"
+    review_reasoning_effort: str = "low"
+    review_max_output_tokens: int = 4_000
+    review_fallback_model: str = "rules-v1"
+    openai_timeout_seconds: float = 120.0
+    openai_max_retries: int = 2
 
 
 settings = Settings()

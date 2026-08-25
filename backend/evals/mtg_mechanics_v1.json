@@ -160,6 +160,15 @@
     {"id": "collar-sharpshooter", "category": "known_interaction", "left": "basilisk_collar", "right": "goblin_sharpshooter", "expected": "synergy", "mechanics": ["deathtouch", "direct_damage"]},
     {"id": "chatterfang-plunderer", "category": "known_interaction", "left": "chatterfang", "right": "pitiless_plunderer", "expected": "conditional_combo", "mechanics": ["creature_death", "treasure_tokens", "token_creation"]}
   ],
+  "retrieval_expectations": [
+    {"id": "retrieve-indirect-deathtouch", "category": "indirect_synergy", "query": "deathtouch poison strategy", "seed_profiles": ["fynn"], "exclude_profiles": ["fynn"], "expected_profile": "bow_of_nylea", "top_n": 5, "component": "mechanic_relationship", "minimum_component": 16},
+    {"id": "retrieve-universal-mana", "category": "universal_card", "query": "extra mana and acceleration", "seed_profiles": [], "exclude_profiles": [], "expected_profile": "sol_ring", "top_n": 5, "component": "universal_utility", "minimum_component": 6},
+    {"id": "retrieve-graveyard-conflict", "category": "anti_synergy", "query": "graveyard recursion", "seed_profiles": ["muldrotha"], "exclude_profiles": ["muldrotha"], "expected_profile": "rest_in_peace", "component": "anti_synergy_penalty", "maximum_component": -24},
+    {"id": "retrieve-known-combo", "category": "known_interaction", "query": "tokens and sacrifice", "seed_profiles": ["chatterfang"], "exclude_profiles": ["chatterfang"], "expected_profile": "pitiless_plunderer", "top_n": 5, "component": "known_combo", "minimum_component": 30}
+  ],
+  "construction_expectations": [
+    {"id": "latest-feasible-build-validates", "category": "hard_constraints", "mode": "latest_feasible_run"}
+  ],
   "legality_expectations": [
     {"id": "hybrid-is-and", "category": "legality_trap", "card_name": "Kitchen Finks", "card_color_identity": ["G", "W"], "commander_color_identity": ["W"], "legal": false},
     {"id": "extort-reminder-ignored", "category": "legality_trap", "card_name": "Blind Obedience", "card_color_identity": ["W"], "commander_color_identity": ["W"], "legal": true},

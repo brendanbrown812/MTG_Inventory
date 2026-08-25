@@ -3,10 +3,15 @@ import {
   EnrichmentJob,
   EnrichmentStatus,
   MechanicProfileSample,
+  OpenAIUsageSummary,
+  QualityEvaluationReport,
   fetchEnrichmentProgress,
   fetchEnrichmentStatus,
   fetchEnrichmentSample,
+  fetchOpenAIUsage,
+  fetchQualityEvaluation,
   startScryfallBackfill,
+  startSemanticIndex,
   startStructuredEnrichment,
 } from "../api";
 
@@ -74,22 +79,35 @@ function useJobPoller(jobId: string | null, refreshStatus: () => void) {
 
 export default function EnrichmentPage() {
   const [status, setStatus] = useState<EnrichmentStatus | null>(null);
+  const [usage, setUsage] = useState<OpenAIUsageSummary | null>(null);
   const [statusErr, setStatusErr] = useState<string | null>(null);
 
   const [sfBatchSize, setSfBatchSize] = useState(200);
   const [sfJobId, setSfJobId] = useState<string | null>(null);
   const [sfErr, setSfErr] = useState<string | null>(null);
 
-  const [tagBatchSize, setTagBatchSize] = useState(100);
+  const [tagBatchSize, setTagBatchSize] = useState(12);
   const [tagJobId, setTagJobId] = useState<string | null>(null);
   const [tagErr, setTagErr] = useState<string | null>(null);
 
+  const [embeddingBatchSize, setEmbeddingBatchSize] = useState(100);
+  const [embeddingJobId, setEmbeddingJobId] = useState<string | null>(null);
+  const [embeddingErr, setEmbeddingErr] = useState<string | null>(null);
+
   const [sample, setSample] = useState<MechanicProfileSample[]>([]);
   const [sampleLoading, setSampleLoading] = useState(false);
+  const [qualityReport, setQualityReport] = useState<QualityEvaluationReport | null>(null);
+  const [qualityLoading, setQualityLoading] = useState(false);
+  const [qualityErr, setQualityErr] = useState<string | null>(null);
 
   const loadStatus = useCallback(async () => {
     try {
-      setStatus(await fetchEnrichmentStatus());
+      const [nextStatus, nextUsage] = await Promise.all([
+        fetchEnrichmentStatus(),
+        fetchOpenAIUsage(),
+      ]);
+      setStatus(nextStatus);
+      setUsage(nextUsage);
       setStatusErr(null);
     } catch (e) {
       setStatusErr(e instanceof Error ? e.message : "Failed to load status");
@@ -100,6 +118,7 @@ export default function EnrichmentPage() {
 
   const sfJob = useJobPoller(sfJobId, loadStatus);
   const tagJob = useJobPoller(tagJobId, loadStatus);
+  const embeddingJob = useJobPoller(embeddingJobId, loadStatus);
 
   async function runBackfill() {
     setSfErr(null);
@@ -130,8 +149,31 @@ export default function EnrichmentPage() {
     }
   }
 
+  async function runQualityGate() {
+    setQualityLoading(true);
+    setQualityErr(null);
+    try {
+      setQualityReport(await fetchQualityEvaluation());
+    } catch (e) {
+      setQualityErr(e instanceof Error ? e.message : "Failed to run quality evaluation");
+    } finally {
+      setQualityLoading(false);
+    }
+  }
+
+  async function runSemanticIndex() {
+    setEmbeddingErr(null);
+    try {
+      const { job_id } = await startSemanticIndex(embeddingBatchSize);
+      setEmbeddingJobId(job_id);
+    } catch (e) {
+      setEmbeddingErr(e instanceof Error ? e.message : "Failed to start semantic indexing");
+    }
+  }
+
   const sfBusy  = sfJob?.status  === "running";
   const tagBusy = tagJob?.status === "running";
+  const embeddingBusy = embeddingJob?.status === "running";
 
   const estCostBatch =
     status
@@ -145,6 +187,7 @@ export default function EnrichmentPage() {
         <p className="mt-2 max-w-2xl text-stone-400">
           Step 1: backfill Scryfall metadata (keywords, oracle text) for existing cards — free, no AI.
           Step 2: create versioned mechanic profiles for deterministic evaluation and deckbuilding.
+          Step 3: embed those mechanics for meaning-based candidate retrieval.
         </p>
       </div>
 
@@ -155,7 +198,7 @@ export default function EnrichmentPage() {
       )}
 
       {status && (
-        <div className="grid gap-4 sm:grid-cols-3">
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
           <Stat label="Cached cards" value={status.total_cards.toLocaleString()} />
           <Stat
             label="Scryfall metadata ready"
@@ -165,7 +208,74 @@ export default function EnrichmentPage() {
             label="Mechanic profiles ready"
             value={`${status.profiled_cards.toLocaleString()} / ${status.total_cards.toLocaleString()}`}
           />
+          <Stat
+            label="Semantic index ready"
+            value={`${status.embedded_cards.toLocaleString()} / ${status.total_cards.toLocaleString()}`}
+          />
         </div>
+      )}
+
+      {usage && (
+        <section className="space-y-4 rounded-2xl border border-white/10 bg-ink-900/60 p-6">
+          <div className="flex flex-wrap items-start justify-between gap-4">
+            <div>
+              <h2 className="text-lg font-semibold text-stone-100">OpenAI Cost Controls</h2>
+              <p className="mt-1 max-w-3xl text-sm text-stone-400">
+                Every paid request reserves its worst-case local estimate before it is sent, then
+                reconciles that reservation with the API token usage. This ledger never contains your API key.
+              </p>
+            </div>
+            <span className={`rounded-full px-3 py-1 text-xs font-medium ${
+              usage.requests_enabled
+                ? "bg-amber-500/20 text-amber-300"
+                : "bg-emerald-500/20 text-emerald-300"
+            }`}>
+              {usage.requests_enabled ? "Paid requests unlocked" : "Paid requests locked"}
+            </span>
+          </div>
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <Stat label={`${usage.month} spent`} value={`$${usage.spent_usd.toFixed(4)}`} />
+            <Stat label="Active reservations" value={`$${usage.reserved_usd.toFixed(4)}`} />
+            <Stat label="Local budget remaining" value={`$${usage.remaining_usd.toFixed(4)}`} />
+            <Stat label="Monthly / request caps" value={`$${usage.monthly_budget_usd.toFixed(2)} / $${usage.single_request_limit_usd.toFixed(2)}`} />
+          </div>
+          <p className="text-xs text-amber-300/90">
+            {usage.notice} Also set a project budget in the OpenAI dashboard. Pricing snapshot: {usage.pricing_version}.
+          </p>
+          {usage.recent.length > 0 && (
+            <div className="overflow-x-auto rounded-xl border border-white/5">
+              <table className="min-w-full text-left text-xs text-stone-400">
+                <thead className="bg-ink-800/80 text-stone-500">
+                  <tr>
+                    <th className="px-3 py-2 font-medium">Workflow</th>
+                    <th className="px-3 py-2 font-medium">Model</th>
+                    <th className="px-3 py-2 font-medium">Status</th>
+                    <th className="px-3 py-2 font-medium">Tokens in / out</th>
+                    <th className="px-3 py-2 font-medium">Cost</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {usage.recent.map((record) => (
+                    <tr key={record.id} className="border-t border-white/5">
+                      <td className="px-3 py-2 text-stone-300">{record.workflow}</td>
+                      <td className="px-3 py-2 font-mono">{record.model}</td>
+                      <td className="px-3 py-2">{record.status}</td>
+                      <td className="px-3 py-2">
+                        {record.input_tokens.toLocaleString()} / {record.output_tokens.toLocaleString()}
+                        {record.cached_input_tokens > 0 && ` (${record.cached_input_tokens.toLocaleString()} cached)`}
+                      </td>
+                      <td className="px-3 py-2">
+                        {record.status === "failed"
+                          ? "released"
+                          : `$${(record.actual_cost_usd ?? record.estimated_max_cost_usd).toFixed(6)}`}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </section>
       )}
 
       {/* ── Step 1: Scryfall Backfill ── */}
@@ -262,6 +372,11 @@ export default function EnrichmentPage() {
             ) : (
               <div>Token averages will appear after your first batch runs.</div>
             )}
+            {!status.paid_requests_enabled && status.enrichment_provider === "openai" && (
+              <div className="text-amber-300">
+                Paid OpenAI requests are locked. Set OPENAI_REQUESTS_ENABLED=true and restart the backend when you intentionally want to create profiles.
+              </div>
+            )}
           </div>
         )}
 
@@ -311,8 +426,163 @@ export default function EnrichmentPage() {
             {tagJob.status === "done" && (
               <p className="mt-2 text-sm text-stone-400">
                 Profiled {tagJob.processed.toLocaleString()} cards. Refresh the sample below to review results.
+                {tagJob.failed
+                  ? ` ${tagJob.failed.toLocaleString()} cards still failed after an isolated retry: ${(tagJob.failed_cards ?? []).join(", ")}.`
+                  : ""}
               </p>
             )}
+          </div>
+        )}
+      </section>
+
+      {/* ── Step 3: Semantic Index ── */}
+      <section className="rounded-2xl border border-white/10 bg-ink-900/60 p-6 space-y-4">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h2 className="text-lg font-semibold text-stone-100">Step 3 — Semantic Candidate Index</h2>
+            <p className="mt-1 text-sm text-stone-400">
+              Embeds Oracle text and structured mechanics once, then uses vector similarity to find relevant
+              owned cards even when the deck request and card text use different words. Changed cards and
+              profiles are detected by content hash and safely re-indexed.
+            </p>
+          </div>
+          {status && (
+            <span className="shrink-0 rounded-full bg-ink-800 px-3 py-1 text-xs text-stone-400">
+              {status.unembedded_cards.toLocaleString()} need indexing
+            </span>
+          )}
+        </div>
+
+        {status && (
+          <div className="rounded-xl border border-white/5 bg-ink-800/40 px-4 py-3 text-xs text-stone-400 space-y-1">
+            <div>
+              Provider: <span className="font-mono text-stone-300">{status.embedding_provider}</span>
+              {" "}· Model: <span className="font-mono text-stone-300">{status.embedding_model}</span>
+              {" "}· Dimensions: <span className="font-mono text-stone-300">{status.embedding_dimensions}</span>
+              {" "}· Index: <span className="font-mono text-stone-300">{status.embedding_index_version}</span>
+            </div>
+            <div>
+              Identical deck queries are cached. If the paid-request lock is later disabled, retrieval falls
+              back to the existing local lexical scorer instead of failing.
+            </div>
+            {!status.paid_requests_enabled && status.embedding_provider === "openai" && (
+              <div className="text-amber-300">
+                Paid OpenAI requests are locked. Turn them on only when you are ready to build the index.
+              </div>
+            )}
+          </div>
+        )}
+
+        <div className="flex items-end gap-3">
+          <label className="flex-1 space-y-1">
+            <span className="text-xs text-stone-500">Cards to index</span>
+            <input
+              type="number"
+              min={1}
+              max={5000}
+              value={embeddingBatchSize}
+              onChange={(e) => setEmbeddingBatchSize(Number(e.target.value))}
+              disabled={embeddingBusy}
+              className="w-full rounded-lg border border-white/10 bg-ink-800 px-3 py-2 text-sm text-stone-200 focus:outline-none focus:ring-1 focus:ring-ember-400/50 disabled:opacity-50"
+            />
+          </label>
+          <button
+            onClick={runSemanticIndex}
+            disabled={embeddingBusy || status?.unembedded_cards === 0 || status?.embedding_provider_configured === false}
+            className="rounded-lg bg-gradient-to-r from-emerald-700 to-emerald-600 px-5 py-2 text-sm font-medium text-white shadow transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            {embeddingBusy ? "Indexing…" : "Build Semantic Index"}
+          </button>
+        </div>
+
+        {status && (
+          <p className="text-xs text-stone-500">
+            Estimated cost for remaining cards: <span className="font-medium text-stone-300">
+              ~${status.estimated_cost_all_unembedded.toFixed(4)}
+            </span>
+            {status.avg_embedding_tokens_per_card == null && " (seed estimate — updates after the first batch)"}
+          </p>
+        )}
+        {embeddingErr && <p className="text-sm text-red-400">{embeddingErr}</p>}
+        {embeddingJob && (
+          <div className="rounded-xl border border-white/5 bg-ink-800/60 p-4">
+            <div className="flex items-center gap-3">
+              <JobStatusBadge job={embeddingJob} />
+              {embeddingJob.status === "error" && <span className="text-sm text-red-300">{embeddingJob.error}</span>}
+            </div>
+            {embeddingJob.status === "running" && (
+              <ProgressBar processed={embeddingJob.processed} total={embeddingJob.total} />
+            )}
+            {embeddingJob.status === "done" && (
+              <p className="mt-2 text-sm text-stone-400">
+                Indexed {embeddingJob.processed.toLocaleString()} cards using {embeddingJob.input_tokens?.toLocaleString() ?? 0} input tokens
+                {embeddingJob.estimated_cost != null ? ` (~$${embeddingJob.estimated_cost.toFixed(4)}).` : "."}
+              </p>
+            )}
+          </div>
+        )}
+      </section>
+
+      {/* ── Local Quality Gate ── */}
+      <section className="rounded-2xl border border-white/10 bg-ink-900/60 p-6 space-y-4">
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          <div>
+            <h2 className="text-lg font-semibold text-stone-100">Local MTG Quality Gate</h2>
+            <p className="mt-1 max-w-3xl text-sm text-stone-400">
+              Runs versioned golden cases for indirect synergy, universal utility, anti-synergy,
+              known interactions, legality traps, and candidate ranking against your stored profiles.
+              This never contacts OpenAI or another provider.
+            </p>
+          </div>
+          <button
+            onClick={runQualityGate}
+            disabled={qualityLoading}
+            className="rounded-lg border border-white/10 bg-ink-800 px-4 py-2 text-sm text-stone-300 transition hover:bg-ink-700 disabled:opacity-50"
+          >
+            {qualityLoading ? "Evaluating…" : qualityReport ? "Run Again" : "Run Quality Gate"}
+          </button>
+        </div>
+
+        {qualityErr && <p className="text-sm text-red-400">{qualityErr}</p>}
+        {qualityReport && (
+          <div className="space-y-4">
+            <div className="grid gap-3 sm:grid-cols-4">
+              <Stat label="Passed" value={qualityReport.summary.passed.toLocaleString()} />
+              <Stat label="Failed" value={qualityReport.summary.failed.toLocaleString()} />
+              <Stat label="Skipped" value={qualityReport.summary.skipped.toLocaleString()} />
+              <Stat
+                label="Pass rate"
+                value={qualityReport.summary.pass_rate == null ? "—" : `${Math.round(qualityReport.summary.pass_rate * 100)}%`}
+              />
+            </div>
+            <p className="text-xs text-stone-500">
+              Suite {qualityReport.suite_version} · Retrieval {qualityReport.retrieval_version} · Coverage {Math.round(qualityReport.summary.coverage * 100)}% · Network requests {qualityReport.network_requests}
+            </p>
+            <div className="space-y-2">
+              {qualityReport.cases.map((qualityCase) => (
+                <details key={qualityCase.id} className="rounded-lg border border-white/5 bg-ink-800/40 px-4 py-3">
+                  <summary className="flex cursor-pointer list-none items-center gap-3 text-sm">
+                    <span className={`rounded px-2 py-0.5 text-[10px] font-semibold uppercase ${
+                      qualityCase.status === "passed"
+                        ? "bg-emerald-500/15 text-emerald-300"
+                        : qualityCase.status === "failed"
+                          ? "bg-red-500/15 text-red-300"
+                          : "bg-stone-500/15 text-stone-400"
+                    }`}>
+                      {qualityCase.status}
+                    </span>
+                    <span className="text-stone-200">{qualityCase.subject}</span>
+                    <span className="ml-auto text-xs text-stone-600">{qualityCase.group} · {qualityCase.category}</span>
+                  </summary>
+                  <div className="mt-3 space-y-2 text-xs text-stone-400">
+                    <p className="font-mono text-stone-500">{qualityCase.id}</p>
+                    {qualityCase.reason && <p>{qualityCase.reason}</p>}
+                    {qualityCase.expected && <pre className="overflow-x-auto whitespace-pre-wrap">Expected: {JSON.stringify(qualityCase.expected, null, 2)}</pre>}
+                    {qualityCase.actual && <pre className="overflow-x-auto whitespace-pre-wrap">Actual: {JSON.stringify(qualityCase.actual, null, 2)}</pre>}
+                  </div>
+                </details>
+              ))}
+            </div>
           </div>
         )}
       </section>
