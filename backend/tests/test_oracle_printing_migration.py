@@ -156,6 +156,33 @@ def test_legacy_migration_separates_oracle_printings_and_preserves_data(tmp_path
             "SELECT COUNT(*) FROM schema_versions WHERE version=8"
         )).scalar_one() == 1
         assert conn.execute(text(
+            "SELECT COUNT(*) FROM schema_versions WHERE version=9"
+        )).scalar_one() == 1
+        assert conn.execute(text(
+            "SELECT COUNT(*) FROM schema_versions WHERE version=10"
+        )).scalar_one() == 1
+        assert conn.execute(text(
+            "SELECT COUNT(*) FROM schema_versions WHERE version=11"
+        )).scalar_one() == 1
+        allocation_columns = {
+            row[1] for row in conn.exec_driver_sql("PRAGMA table_info('deck_cards')")
+        }
+        assert {"grabbed_quantity", "proxy_quantity"} <= allocation_columns
+        assert conn.execute(text(
+            "SELECT grabbed_quantity + proxy_quantity FROM deck_cards"
+        )).scalar_one() == 0
+        migrated_allocation = conn.execute(text(
+            "SELECT deck_card_id, scryfall_id, status, quantity "
+            "FROM deck_card_allocations"
+        )).one()
+        assert migrated_allocation == (1, None, "pending", 1)
+        assert conn.execute(text(
+            "SELECT SUM(quantity) FROM deck_card_allocations "
+            "WHERE deck_card_id = 1"
+        )).scalar_one() == conn.execute(text(
+            "SELECT quantity FROM deck_cards WHERE id = 1"
+        )).scalar_one()
+        assert conn.execute(text(
             "SELECT COUNT(*) FROM sqlite_master "
             "WHERE type='table' AND name='openai_usage_records'"
         )).scalar_one() == 1
@@ -166,5 +193,47 @@ def test_legacy_migration_separates_oracle_printings_and_preserves_data(tmp_path
         assert {row[2] for row in conn.exec_driver_sql(
             "PRAGMA foreign_key_list('deck_cards')"
         )} == {"decks", "card_printings", "oracle_cards"}
+        assert {row[2] for row in conn.exec_driver_sql(
+            "PRAGMA foreign_key_list('deck_card_allocations')"
+        )} == {"deck_cards", "card_printings"}
+
+    engine.dispose()
+
+
+def test_migration_11_repairs_commander_pointer_and_infers_treatment(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "migration-11.db"
+    _create_legacy_database(path)
+    engine = create_engine(f"sqlite:///{path.as_posix()}")
+    Base.metadata.create_all(engine)
+    run_migrations(engine)
+
+    with engine.begin() as conn:
+        conn.execute(text(
+            "UPDATE decks SET commander_scryfall_id=NULL, commander_oracle_id=NULL"
+        ))
+        conn.execute(text(
+            "UPDATE deck_cards SET grabbed_quantity=1, proxy_quantity=0"
+        ))
+        conn.execute(text(
+            "UPDATE deck_card_allocations "
+            "SET status='grabbed', scryfall_id=:sid, foil=NULL"
+        ), {"sid": PRINTING_A})
+        conn.execute(text("DELETE FROM schema_versions WHERE version=11"))
+
+    run_migrations(engine)
+    run_migrations(engine)
+    with engine.connect() as conn:
+        repaired = conn.execute(text(
+            "SELECT commander_scryfall_id, commander_oracle_id FROM decks WHERE id=1"
+        )).one()
+        assert repaired == (PRINTING_A, ORACLE_ID)
+        assert conn.execute(text(
+            "SELECT foil FROM deck_card_allocations WHERE deck_card_id=1"
+        )).scalar_one() == 0
+        assert conn.execute(text(
+            "SELECT COUNT(*) FROM schema_versions WHERE version=11"
+        )).scalar_one() == 1
 
     engine.dispose()

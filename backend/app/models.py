@@ -159,12 +159,42 @@ class DeckCard(Base):
         String(36), ForeignKey("oracle_cards.oracle_id"), index=True
     )
     quantity: Mapped[int] = mapped_column(Integer, default=1)
+    grabbed_quantity: Mapped[int] = mapped_column(Integer, default=0)
+    proxy_quantity: Mapped[int] = mapped_column(Integer, default=0)
     is_commander: Mapped[bool] = mapped_column(Boolean, default=False)
     is_sideboard: Mapped[bool] = mapped_column(Boolean, default=False)
 
     deck: Mapped[Deck] = relationship(back_populates="cards")
     card: Mapped[CardPrinting] = relationship()
     oracle_card: Mapped[OracleCard] = relationship()
+    allocations: Mapped[list["DeckCardAllocation"]] = relationship(
+        back_populates="deck_card", cascade="all, delete-orphan"
+    )
+
+
+class DeckCardAllocation(Base):
+    """A grouped deck quantity assigned to a status and optional exact printing."""
+
+    __tablename__ = "deck_card_allocations"
+    __table_args__ = (
+        Index("ix_deck_card_allocations_card_status", "deck_card_id", "status"),
+        Index("ix_deck_card_allocations_printing_status", "scryfall_id", "status"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    deck_card_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("deck_cards.id", ondelete="CASCADE"), index=True
+    )
+    scryfall_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("card_printings.scryfall_id"), nullable=True, index=True
+    )
+    status: Mapped[str] = mapped_column(String(20))
+    quantity: Mapped[int] = mapped_column(Integer)
+    # NULL means the exact treatment was not recorded (legacy/Any printing).
+    foil: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+
+    deck_card: Mapped[DeckCard] = relationship(back_populates="allocations")
+    printing: Mapped[CardPrinting | None] = relationship()
 
 
 class EnrichmentStats(Base):

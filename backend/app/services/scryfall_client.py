@@ -4,6 +4,7 @@ import threading
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
+from urllib.parse import urlparse
 
 import httpx
 from sqlalchemy.orm import Session
@@ -110,6 +111,49 @@ class ScryfallClient:
             return None
         r.raise_for_status()
         return r.json()
+
+    def fetch_prints_for_card(self, scryfall_id: str) -> list[dict]:
+        """Follow a card's Scryfall prints_search_uri through every page."""
+        card = self.fetch_card_by_id(scryfall_id)
+        if not card:
+            return []
+        next_url = card.get("prints_search_uri")
+        if not next_url:
+            oracle_id = card.get("oracle_id")
+            if not oracle_id:
+                return [card]
+            next_url = f"{self.base}/cards/search"
+            first_params: dict | None = {
+                "order": "released",
+                "q": f"oracleid:{oracle_id}",
+                "unique": "prints",
+            }
+        else:
+            first_params = None
+
+        allowed = urlparse(self.base)
+        output: list[dict] = []
+        seen_urls: set[str] = set()
+        while next_url:
+            if len(seen_urls) >= 100:
+                raise ValueError("Scryfall print pagination exceeded 100 pages")
+            parsed = urlparse(next_url)
+            if parsed.scheme != allowed.scheme or parsed.netloc != allowed.netloc:
+                raise ValueError("Scryfall returned an unexpected print-search URL")
+            if next_url in seen_urls:
+                raise ValueError("Scryfall print pagination repeated a page")
+            seen_urls.add(next_url)
+            response = self._request("GET", next_url, params=first_params)
+            first_params = None
+            if response.status_code == 404:
+                return []
+            response.raise_for_status()
+            page = response.json()
+            output.extend(page.get("data") or [])
+            if len(output) > 10_000:
+                raise ValueError("Scryfall returned too many print options")
+            next_url = page.get("next_page") if page.get("has_more") else None
+        return output
 
     def fetch_named(self, name: str, *, exact: bool = True) -> dict | None:
         param = "exact" if exact else "fuzzy"

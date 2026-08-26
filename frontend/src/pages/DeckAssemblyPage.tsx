@@ -1,22 +1,33 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import {
   createDeck,
   fetchDeck,
   fetchDecks,
   fetchInventory,
   previewDeckText,
+  updateDeckCardAssembly,
+  updateDeckAssembly,
   type Deck,
   type DeckDetail,
   type DeckTextPreview,
   type InventoryLine,
 } from "../api";
+import {
+  DeckPrintingModal,
+  deckAllocationUnits,
+} from "../components/DeckPrintingModal";
 import { CONSTRUCTED_FORMATS, formatOptionLabel } from "../lib/formats";
 
 type SourceMode = "existing" | "moxfield";
 type SortMode = "deck" | "name" | "color" | "type";
+type AssemblyStatus = "pending" | "grabbed" | "proxy";
 
 type AssemblyCard = {
   key: string;
+  deckCardId: number | null;
+  allocationUnitIndex: number;
+  allocatedScryfallId: string | null;
   scryfallId: string;
   oracleId: string;
   name: string;
@@ -31,6 +42,7 @@ type AssemblyCard = {
   copyTotal: number;
   ownedQuantity: number;
   available: boolean;
+  status: AssemblyStatus;
 };
 
 const MOXFIELD_EXAMPLE = `1 Splinter of the Shadows (PZA) 6
@@ -88,19 +100,6 @@ function sortedCards(cards: AssemblyCard[], mode: SortMode): AssemblyCard[] {
   });
 }
 
-function progressStorageKey(deckId: number): string {
-  return `spellbinder:assembly:deck:${deckId}`;
-}
-
-function readProgress(key: string): Set<string> {
-  try {
-    const value = JSON.parse(localStorage.getItem(key) ?? "[]");
-    return new Set(Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : []);
-  } catch {
-    return new Set();
-  }
-}
-
 function expandDeck(deck: DeckDetail, ownedByOracle: Map<string, number>): AssemblyCard[] {
   const requiredByOracle = new Map<string, number>();
   const totalByOracle = new Map<string, number>();
@@ -111,25 +110,33 @@ function expandDeck(deck: DeckDetail, ownedByOracle: Map<string, number>): Assem
   return deck.cards.flatMap((entry) => {
     const oracleId = entry.card?.oracle_id ?? entry.scryfall_id;
     const ownedQuantity = ownedByOracle.get(oracleId) ?? 0;
-    return Array.from({ length: entry.quantity }, (_, offset) => {
+    const units = deckAllocationUnits(entry);
+    return units.map((unit, offset) => {
       const copyIndex = (requiredByOracle.get(oracleId) ?? 0) + 1;
       requiredByOracle.set(oracleId, copyIndex);
+      const exactPrinting = entry.allocations.find(
+        (allocation) => allocation.scryfall_id === unit.scryfallId,
+      )?.printing;
       return {
         key: `deck-${deck.id}-${entry.id}-${offset + 1}`,
-        scryfallId: entry.scryfall_id,
+        deckCardId: entry.id,
+        allocationUnitIndex: offset,
+        allocatedScryfallId: unit.scryfallId,
+        scryfallId: exactPrinting?.scryfall_id ?? entry.scryfall_id,
         oracleId,
         name: entry.card?.name ?? entry.scryfall_id,
         typeLine: entry.card?.type_line ?? null,
         colors: entry.card?.colors ?? "",
-        imageUri: entry.card?.image_uri_normal ?? null,
-        setCode: null,
-        collectorNumber: null,
-        foil: false,
+        imageUri: exactPrinting?.image_uri_normal ?? entry.card?.image_uri_normal ?? null,
+        setCode: exactPrinting?.set_code ?? entry.card?.set_code ?? null,
+        collectorNumber: exactPrinting?.collector_number ?? entry.card?.collector_number ?? null,
+        foil: unit.foil ?? false,
         isCommander: entry.is_commander,
         copyIndex,
         copyTotal: totalByOracle.get(oracleId) ?? entry.quantity,
         ownedQuantity,
         available: copyIndex <= ownedQuantity,
+        status: unit.status,
       };
     });
   });
@@ -147,6 +154,9 @@ function expandPreview(preview: DeckTextPreview): AssemblyCard[] {
       requiredByOracle.set(entry.oracle_id, copyIndex);
       return {
         key: `moxfield-${entry.line_index}-${entry.oracle_id}-${offset + 1}`,
+        deckCardId: null,
+        allocationUnitIndex: offset,
+        allocatedScryfallId: entry.scryfall_id,
         scryfallId: entry.scryfall_id,
         oracleId: entry.oracle_id,
         name: entry.name,
@@ -161,6 +171,7 @@ function expandPreview(preview: DeckTextPreview): AssemblyCard[] {
         copyTotal: totalByOracle.get(entry.oracle_id) ?? entry.quantity,
         ownedQuantity: entry.owned_quantity,
         available: copyIndex <= entry.owned_quantity,
+        status: "pending",
       };
     })
   ));
@@ -169,15 +180,15 @@ function expandPreview(preview: DeckTextPreview): AssemblyCard[] {
 function CardChecklist({
   title,
   cards,
-  checked,
-  onToggle,
-  grabbed = false,
+  onSetStatus,
+  onOpenCard,
+  emptyText,
 }: {
   title: string;
   cards: AssemblyCard[];
-  checked: Set<string>;
-  onToggle: (key: string) => void;
-  grabbed?: boolean;
+  onSetStatus: (card: AssemblyCard, status: AssemblyStatus) => void;
+  onOpenCard?: (card: AssemblyCard) => void;
+  emptyText: string;
 }) {
   const hoverTimer = useRef<number | null>(null);
   const [hoverPreview, setHoverPreview] = useState<{
@@ -194,7 +205,7 @@ function CardChecklist({
     setHoverPreview(null);
   }
 
-  function scheduleHoverPreview(card: AssemblyCard, element: HTMLLabelElement) {
+  function scheduleHoverPreview(card: AssemblyCard, element: HTMLElement) {
     cancelHoverPreview();
     if (!card.imageUri) return;
     const rect = element.getBoundingClientRect();
@@ -224,20 +235,29 @@ function CardChecklist({
       </div>
       {cards.length === 0 ? (
         <div className="rounded-2xl border border-dashed border-white/10 bg-ink-900/25 px-6 py-10 text-center text-sm text-stone-500">
-          {grabbed ? "Checked cards will move down here." : "Everything in this list has been grabbed."}
+          {emptyText}
         </div>
       ) : (
-        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6">
+        <div className="grid grid-cols-[repeat(auto-fill,minmax(155px,1fr))] gap-3 sm:grid-cols-[repeat(auto-fill,minmax(175px,1fr))] xl:grid-cols-[repeat(auto-fill,minmax(190px,1fr))]">
           {cards.map((card) => (
-            <label
+            <article
               key={card.key}
               onMouseEnter={(event) => scheduleHoverPreview(card, event.currentTarget)}
               onMouseLeave={cancelHoverPreview}
-              className={`group relative cursor-pointer overflow-hidden rounded-xl border bg-ink-900/65 shadow-card transition hover:-translate-y-0.5 focus-within:ring-2 focus-within:ring-ember-400/60 ${
-                grabbed ? "border-emerald-500/25 opacity-65 hover:opacity-100" : "border-white/10 hover:border-ember-400/40"
+              className={`group relative overflow-hidden rounded-xl border bg-ink-900/65 shadow-card transition hover:-translate-y-0.5 ${
+                card.status === "grabbed" ? "border-emerald-500/25" : card.status === "proxy" ? "border-violet-500/30" : "border-white/10 hover:border-ember-400/40"
               }`}
             >
-              <div className="relative aspect-[5/7] overflow-hidden bg-ink-800">
+              <button
+                type="button"
+                onClick={() => {
+                  cancelHoverPreview();
+                  onOpenCard?.(card);
+                }}
+                disabled={!onOpenCard}
+                className="relative block aspect-[5/7] w-full overflow-hidden bg-ink-800 text-left disabled:cursor-default"
+                aria-label={onOpenCard ? `Choose printing for ${card.name}` : undefined}
+              >
                 {card.imageUri ? (
                   <img src={card.imageUri} alt={card.name} className="h-full w-full object-cover" loading="lazy" />
                 ) : (
@@ -255,26 +275,50 @@ function CardChecklist({
                 }`}>
                   {card.available ? `Owned ${card.ownedQuantity}` : `Missing · owned ${card.ownedQuantity}`}
                 </span>
-                <input
-                  type="checkbox"
-                  checked={checked.has(card.key)}
-                  onChange={() => {
-                    cancelHoverPreview();
-                    onToggle(card.key);
-                  }}
-                  aria-label={`${checked.has(card.key) ? "Return" : "Mark"} ${card.name} ${card.copyIndex} as grabbed`}
-                  className="sr-only"
-                />
-              </div>
+              </button>
               <div className="space-y-1 p-3">
-                <p className="line-clamp-2 text-sm font-medium leading-tight text-stone-100">{card.name}</p>
+                <button
+                  type="button"
+                  onClick={() => {
+                    cancelHoverPreview();
+                    onOpenCard?.(card);
+                  }}
+                  disabled={!onOpenCard}
+                  className="line-clamp-2 text-left text-sm font-medium leading-tight text-stone-100 enabled:hover:text-ember-200 disabled:cursor-default"
+                >
+                  {card.name}
+                </button>
                 <p className="truncate text-[10px] text-stone-500">
                   {[card.setCode?.toUpperCase(), card.collectorNumber, card.foil ? "Foil" : null]
                     .filter(Boolean)
-                    .join(" · ") || card.typeLine || "Card"}
+                  .join(" · ") || card.typeLine || "Card"}
                 </p>
+                <div className="grid grid-cols-3 gap-1 pt-2">
+                  {(["pending", "grabbed", "proxy"] as const).map((status) => (
+                    <button
+                      key={status}
+                      type="button"
+                      onClick={() => {
+                        cancelHoverPreview();
+                        onSetStatus(card, status);
+                      }}
+                      disabled={card.status === status}
+                      className={`rounded-md px-1 py-1 text-[9px] font-semibold uppercase tracking-wide transition ${
+                        card.status === status
+                          ? status === "grabbed"
+                            ? "bg-emerald-500/25 text-emerald-100"
+                            : status === "proxy"
+                              ? "bg-violet-500/25 text-violet-100"
+                              : "bg-amber-500/20 text-amber-100"
+                          : "bg-white/5 text-stone-500 hover:bg-white/10 hover:text-stone-200"
+                      }`}
+                    >
+                      {status === "pending" ? "Need" : status}
+                    </button>
+                  ))}
+                </div>
               </div>
-            </label>
+            </article>
           ))}
         </div>
       )}
@@ -293,22 +337,32 @@ function CardChecklist({
 }
 
 export default function DeckAssemblyPage() {
-  const [setupOpen, setSetupOpen] = useState(true);
-  const [mode, setMode] = useState<SourceMode>("moxfield");
+  const [searchParams] = useSearchParams();
+  const requestedDeckParam = searchParams.get("deck") ?? "";
+  const [setupOpen, setSetupOpen] = useState(!requestedDeckParam);
+  const [mode, setMode] = useState<SourceMode>(requestedDeckParam ? "existing" : "moxfield");
   const [sortMode, setSortMode] = useState<SortMode>(() => {
     const saved = localStorage.getItem("spellbinder:assembly:sort");
     return saved === "name" || saved === "color" || saved === "type" ? saved : "deck";
   });
   const [decks, setDecks] = useState<Deck[]>([]);
   const [inventory, setInventory] = useState<InventoryLine[]>([]);
-  const [selectedDeckId, setSelectedDeckId] = useState("");
+  const [selectedDeckId, setSelectedDeckId] = useState(requestedDeckParam);
   const [activeDeck, setActiveDeck] = useState<DeckDetail | null>(null);
   const [cards, setCards] = useState<AssemblyCard[]>([]);
-  const [checked, setChecked] = useState<Set<string>>(new Set());
-  const [progressKey, setProgressKey] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [working, setWorking] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [printingEditor, setPrintingEditor] = useState<{
+    deckCardId: number;
+    unitIndex: number;
+  } | null>(null);
+  const loadedDeepLinkRef = useRef<string | null>(null);
+  const cardsRef = useRef<AssemblyCard[]>([]);
+  const activeDeckRef = useRef<DeckDetail | null>(null);
+  const statusQueuesRef = useRef(new Map<number, Promise<void>>());
+  const statusMutationVersionRef = useRef(0);
+  const canonicalRefreshTimerRef = useRef<number | null>(null);
 
   const [moxfieldText, setMoxfieldText] = useState("");
   const [preview, setPreview] = useState<DeckTextPreview | null>(null);
@@ -345,13 +399,62 @@ export default function DeckAssemblyPage() {
   }, []);
 
   useEffect(() => {
-    if (!progressKey) return;
-    localStorage.setItem(progressKey, JSON.stringify([...checked]));
-  }, [checked, progressKey]);
-
-  useEffect(() => {
     localStorage.setItem("spellbinder:assembly:sort", sortMode);
   }, [sortMode]);
+
+  useEffect(() => {
+    cardsRef.current = cards;
+  }, [cards]);
+
+  useEffect(() => {
+    activeDeckRef.current = activeDeck;
+  }, [activeDeck]);
+
+  useEffect(() => () => {
+    if (canonicalRefreshTimerRef.current !== null) {
+      window.clearTimeout(canonicalRefreshTimerRef.current);
+    }
+  }, []);
+
+  function scheduleCanonicalRefresh(deckId: number) {
+    if (canonicalRefreshTimerRef.current !== null) {
+      window.clearTimeout(canonicalRefreshTimerRef.current);
+    }
+    canonicalRefreshTimerRef.current = window.setTimeout(() => {
+      canonicalRefreshTimerRef.current = null;
+      if (statusQueuesRef.current.size > 0) {
+        scheduleCanonicalRefresh(deckId);
+        return;
+      }
+      const refreshVersion = statusMutationVersionRef.current;
+      void Promise.all([fetchDeck(deckId), fetchInventory("", "name")])
+        .then(([deck, inventoryRows]) => {
+          if (activeDeckRef.current?.id !== deckId) return;
+          if (
+            statusQueuesRef.current.size > 0
+            || statusMutationVersionRef.current !== refreshVersion
+          ) {
+            scheduleCanonicalRefresh(deckId);
+            return;
+          }
+          const nextOwned = new Map<string, number>();
+          for (const row of inventoryRows) {
+            if (row.card) {
+              nextOwned.set(row.card.oracle_id, (nextOwned.get(row.card.oracle_id) ?? 0) + row.quantity);
+            }
+          }
+          const expanded = expandDeck(deck, nextOwned);
+          activeDeckRef.current = deck;
+          cardsRef.current = expanded;
+          setActiveDeck(deck);
+          setInventory(inventoryRows);
+          setCards(expanded);
+        })
+        .catch((reason) => {
+          setError(reason instanceof Error ? reason.message : "Could not refresh assembly data");
+        });
+    }, 900);
+  }
 
   const loadDeckForAssembly = useCallback(async (deckId: number) => {
     setWorking(true);
@@ -359,34 +462,95 @@ export default function DeckAssemblyPage() {
     try {
       const deck = await fetchDeck(deckId);
       const expanded = expandDeck(deck, ownedByOracle);
-      const key = progressStorageKey(deck.id);
       setActiveDeck(deck);
       setCards(expanded);
-      setProgressKey(key);
-      setChecked(readProgress(key));
       setSetupOpen(false);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Could not open deck");
+      setSetupOpen(true);
     } finally {
       setWorking(false);
     }
   }, [ownedByOracle]);
 
+  useEffect(() => {
+    if (loading || !requestedDeckParam || loadedDeepLinkRef.current === requestedDeckParam) return;
+    const requestedDeckId = Number(requestedDeckParam);
+    loadedDeepLinkRef.current = requestedDeckParam;
+    if (!Number.isInteger(requestedDeckId) || requestedDeckId <= 0) {
+      setSetupOpen(true);
+      setError("The requested deck link is invalid.");
+      return;
+    }
+    setMode("existing");
+    setSelectedDeckId(requestedDeckParam);
+    void loadDeckForAssembly(requestedDeckId);
+  }, [loading, loadDeckForAssembly, requestedDeckParam]);
+
   function changeMode(nextMode: SourceMode) {
     setMode(nextMode);
     setActiveDeck(null);
     setCards([]);
-    setChecked(new Set());
-    setProgressKey(null);
     setError(null);
   }
 
-  function toggleCard(key: string) {
-    setChecked((previous) => {
-      const next = new Set(previous);
-      if (next.has(key)) next.delete(key);
-      else next.add(key);
-      return next;
+  async function setCardStatus(card: AssemblyCard, status: AssemblyStatus) {
+    if (card.status === status) return;
+    if (!activeDeck || card.deckCardId === null) {
+      const updated = cardsRef.current.map((item) => item.key === card.key ? { ...item, status } : item);
+      cardsRef.current = updated;
+      setCards(updated);
+      return;
+    }
+    const deckId = activeDeck.id;
+    const deckCardId = card.deckCardId;
+    const previousStatus = cardsRef.current.find((item) => item.key === card.key)?.status ?? card.status;
+    const optimisticCards = cardsRef.current.map((item) => (
+      item.key === card.key ? { ...item, status } : item
+    ));
+    statusMutationVersionRef.current += 1;
+    cardsRef.current = optimisticCards;
+    setCards(optimisticCards);
+    setError(null);
+
+    const entryCards = optimisticCards.filter((item) => item.deckCardId === deckCardId);
+    const grabbedQuantity = entryCards.filter((item) => item.status === "grabbed").length;
+    const proxyQuantity = entryCards.filter((item) => item.status === "proxy").length;
+    const previousRequest = statusQueuesRef.current.get(deckCardId) ?? Promise.resolve();
+    const request = previousRequest.then(async () => {
+      try {
+        const updatedEntry = await updateDeckCardAssembly(deckId, deckCardId, {
+          grabbed_quantity: grabbedQuantity,
+          proxy_quantity: proxyQuantity,
+        });
+        if (activeDeckRef.current?.id === deckId) {
+          const updatedDeck = {
+            ...activeDeckRef.current,
+            cards: activeDeckRef.current.cards.map((entry) => (
+              entry.id === updatedEntry.id ? updatedEntry : entry
+            )),
+          };
+          activeDeckRef.current = updatedDeck;
+          setActiveDeck(updatedDeck);
+          scheduleCanonicalRefresh(deckId);
+        }
+      } catch (reason) {
+        const rolledBack = cardsRef.current.map((item) => (
+          item.key === card.key && item.status === status
+            ? { ...item, status: previousStatus }
+            : item
+        ));
+        cardsRef.current = rolledBack;
+        setCards(rolledBack);
+        setError(reason instanceof Error ? reason.message : "Could not update assembly status");
+        scheduleCanonicalRefresh(deckId);
+      }
+    });
+    statusQueuesRef.current.set(deckCardId, request);
+    void request.finally(() => {
+      if (statusQueuesRef.current.get(deckCardId) === request) {
+        statusQueuesRef.current.delete(deckCardId);
+      }
     });
   }
 
@@ -398,8 +562,6 @@ export default function DeckAssemblyPage() {
       const result = await previewDeckText(moxfieldText);
       setPreview(result);
       setCards(expandPreview(result));
-      setChecked(new Set());
-      setProgressKey(null);
       setActiveDeck(null);
       setCommanderOracleId(result.cards.find((card) => card.is_commander)?.oracle_id ?? "");
     } catch (reason) {
@@ -428,29 +590,32 @@ export default function DeckAssemblyPage() {
         })),
       });
 
-      const checkedCounts = new Map<string, number>();
+      const counts = new Map<string, { grabbed: number; proxy: number }>();
       for (const card of cards) {
-        if (checked.has(card.key)) {
-          checkedCounts.set(card.oracleId, (checkedCounts.get(card.oracleId) ?? 0) + 1);
-        }
+        const key = `${card.oracleId}:${card.isCommander}`;
+        const value = counts.get(key) ?? { grabbed: 0, proxy: 0 };
+        if (card.status === "grabbed") value.grabbed += 1;
+        if (card.status === "proxy") value.proxy += 1;
+        counts.set(key, value);
       }
-      const expanded = expandDeck(created, ownedByOracle);
-      const migratedChecked = new Set<string>();
-      for (const card of expanded) {
-        const remaining = checkedCounts.get(card.oracleId) ?? 0;
-        if (remaining > 0) {
-          migratedChecked.add(card.key);
-          checkedCounts.set(card.oracleId, remaining - 1);
-        }
+      const assemblyUpdates = created.cards.map((entry) => {
+        const value = counts.get(`${entry.card?.oracle_id ?? entry.scryfall_id}:${entry.is_commander}`) ?? { grabbed: 0, proxy: 0 };
+        return { deck_card_id: entry.id, grabbed_quantity: value.grabbed, proxy_quantity: value.proxy };
+      });
+      const assembled = assemblyUpdates.some((entry) => entry.grabbed_quantity || entry.proxy_quantity)
+        ? await updateDeckAssembly(created.id, assemblyUpdates)
+        : created;
+      const inventoryRows = await fetchInventory("", "name");
+      const nextOwned = new Map<string, number>();
+      for (const row of inventoryRows) {
+        if (row.card) nextOwned.set(row.card.oracle_id, (nextOwned.get(row.card.oracle_id) ?? 0) + row.quantity);
       }
-      const key = progressStorageKey(created.id);
-      localStorage.setItem(key, JSON.stringify([...migratedChecked]));
+      const expanded = expandDeck(assembled, nextOwned);
       setDecks((previous) => [...previous, created].sort((a, b) => a.name.localeCompare(b.name)));
       setSelectedDeckId(String(created.id));
-      setActiveDeck(created);
+      setInventory(inventoryRows);
+      setActiveDeck(assembled);
       setCards(expanded);
-      setChecked(migratedChecked);
-      setProgressKey(key);
       setMode("existing");
       setPreview(null);
       setSetupOpen(false);
@@ -461,8 +626,37 @@ export default function DeckAssemblyPage() {
     }
   }
 
-  const remainingCards = sortedCards(cards.filter((card) => !checked.has(card.key)), sortMode);
-  const grabbedCards = sortedCards(cards.filter((card) => checked.has(card.key)), sortMode);
+  async function setAllStatuses(status: AssemblyStatus) {
+    if (!activeDeck) {
+      setCards((previous) => previous.map((card) => ({ ...card, status })));
+      return;
+    }
+    setWorking(true);
+    setError(null);
+    try {
+      const updated = await updateDeckAssembly(activeDeck.id, activeDeck.cards.map((entry) => ({
+        deck_card_id: entry.id,
+        grabbed_quantity: status === "grabbed" ? entry.quantity : 0,
+        proxy_quantity: status === "proxy" ? entry.quantity : 0,
+      })));
+      const inventoryRows = await fetchInventory("", "name");
+      const nextOwned = new Map<string, number>();
+      for (const row of inventoryRows) {
+        if (row.card) nextOwned.set(row.card.oracle_id, (nextOwned.get(row.card.oracle_id) ?? 0) + row.quantity);
+      }
+      setInventory(inventoryRows);
+      setActiveDeck(updated);
+      setCards(expandDeck(updated, nextOwned));
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not update assembly statuses");
+    } finally {
+      setWorking(false);
+    }
+  }
+
+  const remainingCards = sortedCards(cards.filter((card) => card.status === "pending"), sortMode);
+  const grabbedCards = sortedCards(cards.filter((card) => card.status === "grabbed"), sortMode);
+  const proxyCards = sortedCards(cards.filter((card) => card.status === "proxy"), sortMode);
   const missingCount = cards.filter((card) => !card.available).length;
   const uniqueCommanderChoices = preview
     ? [...new Map(preview.cards.map((card) => [card.oracle_id, card])).values()]
@@ -476,7 +670,7 @@ export default function DeckAssemblyPage() {
             <h1 className="font-display text-4xl font-semibold text-stone-100">Deck assembly</h1>
             <p className="mt-2 max-w-2xl text-stone-400">
               {setupOpen
-                ? "Open a saved deck or paste a Moxfield list, then check off each physical card as you pull it from bulk. Progress for saved decks stays on this browser."
+                ? "Open a saved deck or paste a Moxfield list, then mark each copy as needed, physically grabbed, or proxied. Saved deck locations are tracked in your collection."
                 : `${activeDeck?.name ?? "Assembly list"} · setup controls hidden`}
             </p>
           </div>
@@ -622,7 +816,7 @@ export default function DeckAssemblyPage() {
             <div>
               <p className="font-medium text-stone-200">{activeDeck?.name ?? "Moxfield preview"}</p>
               <p className="text-sm text-stone-500">
-                {grabbedCards.length} of {cards.length} grabbed
+                {grabbedCards.length} grabbed · {proxyCards.length} proxied · {remainingCards.length} still needed
                 {missingCount > 0 ? ` · ${missingCount} not currently in collection` : " · collection has every card"}
               </p>
             </div>
@@ -640,15 +834,32 @@ export default function DeckAssemblyPage() {
                   <option value="type">Card type</option>
                 </select>
               </label>
-              <button type="button" onClick={() => setChecked(new Set(cards.map((card) => card.key)))} className="rounded-lg border border-white/10 bg-ink-800 px-3 py-2 text-xs text-stone-300 hover:bg-ink-700">Mark all grabbed</button>
-              <button type="button" onClick={() => setChecked(new Set())} className="rounded-lg border border-white/10 bg-ink-800 px-3 py-2 text-xs text-stone-300 hover:bg-ink-700">Reset checks</button>
+              <button type="button" disabled={working} onClick={() => void setAllStatuses("grabbed")} className="rounded-lg border border-white/10 bg-ink-800 px-3 py-2 text-xs text-stone-300 hover:bg-ink-700 disabled:opacity-40">Mark all grabbed</button>
+              <button type="button" disabled={working} onClick={() => void setAllStatuses("pending")} className="rounded-lg border border-white/10 bg-ink-800 px-3 py-2 text-xs text-stone-300 hover:bg-ink-700 disabled:opacity-40">Mark all needed</button>
             </div>
           </div>
 
-          <CardChecklist title="Still to grab" cards={remainingCards} checked={checked} onToggle={toggleCard} />
-          <CardChecklist title="Grabbed already" cards={grabbedCards} checked={checked} onToggle={toggleCard} grabbed />
+          <CardChecklist title="Still to grab" cards={remainingCards} onSetStatus={(card, status) => void setCardStatus(card, status)} onOpenCard={activeDeck ? (card) => setPrintingEditor({ deckCardId: card.deckCardId!, unitIndex: card.allocationUnitIndex }) : undefined} emptyText="Every card is assigned or proxied." />
+          <CardChecklist title="Grabbed already" cards={grabbedCards} onSetStatus={(card, status) => void setCardStatus(card, status)} onOpenCard={activeDeck ? (card) => setPrintingEditor({ deckCardId: card.deckCardId!, unitIndex: card.allocationUnitIndex }) : undefined} emptyText="Physical copies you grab will move here." />
+          <CardChecklist title="Proxies" cards={proxyCards} onSetStatus={(card, status) => void setCardStatus(card, status)} onOpenCard={activeDeck ? (card) => setPrintingEditor({ deckCardId: card.deckCardId!, unitIndex: card.allocationUnitIndex }) : undefined} emptyText="Cards marked as proxies will appear here without changing your collection." />
         </div>
       )}
+      {activeDeck && printingEditor && (() => {
+        const deckCard = activeDeck.cards.find((entry) => entry.id === printingEditor.deckCardId);
+        return deckCard ? (
+          <DeckPrintingModal
+            deckId={activeDeck.id}
+            deckCard={deckCard}
+            initialUnitIndex={printingEditor.unitIndex}
+            onClose={() => setPrintingEditor(null)}
+            onSaved={(updated) => {
+              setActiveDeck(updated);
+              setCards(expandDeck(updated, ownedByOracle));
+              setPrintingEditor(null);
+            }}
+          />
+        ) : null;
+      })()}
     </div>
   );
 }

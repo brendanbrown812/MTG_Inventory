@@ -6,7 +6,7 @@ from pathlib import Path
 from app.database import SessionLocal
 from app.mechanics.profile import MechanicProfile
 from app.models import (
-    CardPrinting, InventoryLine, MechanicProfileRecord, OracleCard,
+    CardPrinting, Deck, DeckCard, InventoryLine, MechanicProfileRecord, OracleCard,
     RecommendationCardPreference,
 )
 from app.services.candidate_retrieval import RETRIEVAL_VERSION, retrieve_owned_candidates
@@ -130,6 +130,31 @@ def test_known_combo_is_a_separate_transparent_score_component() -> None:
         assert plunderer["owned_quantity"] == 3
         assert plunderer["retrieval"]["components"]["known_combo"] == 30
         assert any("Known conditional combo" in reason for reason in plunderer["retrieval"]["reasons"])
+
+
+def test_candidate_retrieval_only_offers_unreserved_physical_copies() -> None:
+    with SessionLocal() as db:
+        profile = _golden("sol_ring")
+        _add_owned(db, profile, quantity=3)
+        db.flush()
+        printing = db.query(CardPrinting).filter(CardPrinting.oracle_id == profile.oracle_id).first()
+        deck = Deck(name="Reserved copies", format="commander", status="building")
+        db.add(deck)
+        db.flush()
+        db.add(DeckCard(
+            deck_id=deck.id,
+            scryfall_id=printing.scryfall_id,
+            oracle_id=profile.oracle_id,
+            quantity=3,
+            grabbed_quantity=1,
+            proxy_quantity=1,
+        ))
+        db.commit()
+
+        candidate = retrieve_owned_candidates(db, "mana", limit=1)[0]
+        assert candidate["owned_quantity"] == 1
+        assert candidate["physical_owned_quantity"] == 3
+        assert candidate["reserved_quantity"] == 2
 
 
 def test_collection_legality_and_commander_color_identity_filter_before_scoring() -> None:

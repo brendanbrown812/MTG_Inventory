@@ -2,14 +2,20 @@ import { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import {
   clearInventory,
+  changeInventoryLinePrinting,
+  changeInventoryPrinting,
   deleteInventoryLine,
-  fetchCardDecks,
+  fetchCardLocations,
   fetchCardMatches,
-  fetchInventory,
-  type CardDeckMembership,
+  fetchGroupedInventory,
+  type CardLocationSummary,
   type DeckMatch,
+  type InventoryOracleGroup,
   type InventoryLine,
+  type InventoryPrinting,
 } from "../api";
+import { PrintingCarousel } from "../components/PrintingCarousel";
+import { PrintChangePicker } from "../components/PrintChangePicker";
 
 const CMC_VALUES = ["0", "1", "2", "3", "4", "5", "6+"] as const;
 
@@ -26,6 +32,24 @@ const TYPES = [
   "Legendary Creature", "Creature", "Instant", "Sorcery", "Artifact",
   "Enchantment", "Planeswalker", "Land", "Battle",
 ] as const;
+
+const PRINTING_SELECTION_KEY = "spellbinder:collection:selected-printings";
+
+type PrintChangeTarget =
+  | { kind: "printing"; sourceScryfallId: string }
+  | { kind: "line"; sourceScryfallId: string; line: InventoryLine };
+
+function readPrintingSelections(): Record<string, string> {
+  try {
+    const value = JSON.parse(localStorage.getItem(PRINTING_SELECTION_KEY) ?? "{}");
+    if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+    return Object.fromEntries(
+      Object.entries(value).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
+    );
+  } catch {
+    return {};
+  }
+}
 
 function FilterChip({
   label,
@@ -63,7 +87,7 @@ export default function InventoryPage() {
   const [q, setQ] = useState("");
   const [debouncedQ, setDebouncedQ] = useState("");
   const [sort, setSort] = useState("name");
-  const [rows, setRows] = useState<InventoryLine[]>([]);
+  const [groups, setGroups] = useState<InventoryOracleGroup[]>([]);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
   const [clearing, setClearing] = useState(false);
@@ -76,12 +100,16 @@ export default function InventoryPage() {
   const [typeFilter, setTypeFilter] = useState<Set<string>>(new Set());
 
   // Card detail modal state
-  const [selected, setSelected] = useState<InventoryLine | null>(null);
-  const [memberships, setMemberships] = useState<CardDeckMembership[] | null>(null);
+  const [selected, setSelected] = useState<InventoryOracleGroup | null>(null);
+  const [selectedPrintingByOracle, setSelectedPrintingByOracle] = useState<Record<string, string>>(
+    readPrintingSelections,
+  );
+  const [locations, setLocations] = useState<CardLocationSummary | null>(null);
   const [membershipLoading, setMembershipLoading] = useState(false);
   const [matches, setMatches] = useState<DeckMatch[] | null>(null);
   const [matchLoading, setMatchLoading] = useState(false);
   const [deletingId, setDeletingId] = useState<number | null>(null);
+  const [printChangeTarget, setPrintChangeTarget] = useState<PrintChangeTarget | null>(null);
 
   useEffect(() => {
     const t = setTimeout(() => setDebouncedQ(q), 320);
@@ -92,21 +120,21 @@ export default function InventoryPage() {
     setLoading(true);
     setErr(null);
     try {
-      setRows(await fetchInventory(debouncedQ, sort));
+      setGroups(await fetchGroupedInventory(debouncedQ));
     } catch (e) {
       setErr(e instanceof Error ? e.message : "Failed to load");
     } finally {
       setLoading(false);
     }
-  }, [debouncedQ, sort]);
+  }, [debouncedQ]);
 
   useEffect(() => {
     void load();
   }, [load]);
 
   // Client-side filter applied on top of the server-sorted/searched rows
-  const filteredRows = rows.filter((row) => {
-    const c = row.card;
+  const filteredGroups = groups.filter((group) => {
+    const c = group.card;
 
     if (cmcFilter.size > 0) {
       const bucket = Math.floor(c?.cmc ?? 0) >= 6 ? "6+" : String(Math.floor(c?.cmc ?? 0));
@@ -148,15 +176,52 @@ export default function InventoryPage() {
     setTypeFilter(new Set());
   }
 
-  async function openCard(row: InventoryLine) {
-    setSelected(row);
+  function selectedPrinting(group: InventoryOracleGroup): InventoryPrinting | undefined {
+    const savedId = selectedPrintingByOracle[group.oracle_id];
+    return group.printings.find((printing) => printing.scryfall_id === savedId) ?? group.printings[0];
+  }
+
+  const visibleGroups = [...filteredGroups].sort((left, right) => {
+    if (sort === "quantity") {
+      return right.total_quantity - left.total_quantity || left.card.name.localeCompare(right.card.name);
+    }
+    if (sort === "set") {
+      const leftPrinting = selectedPrinting(left);
+      const rightPrinting = selectedPrinting(right);
+      const leftKey = `${leftPrinting?.set_code ?? ""}:${leftPrinting?.collector_number ?? ""}`;
+      const rightKey = `${rightPrinting?.set_code ?? ""}:${rightPrinting?.collector_number ?? ""}`;
+      return leftKey.localeCompare(rightKey) || left.card.name.localeCompare(right.card.name);
+    }
+    return left.card.name.localeCompare(right.card.name);
+  });
+
+  async function openCard(group: InventoryOracleGroup) {
+    setSelected(group);
     setMatches(null);
-    setMemberships(null);
+    setLocations(null);
     setMembershipLoading(true);
     try {
-      setMemberships(await fetchCardDecks(row.scryfall_id));
+      const printing = selectedPrinting(group);
+      setLocations(printing ? await fetchCardLocations(printing.scryfall_id) : null);
     } catch {
-      setMemberships([]);
+      setLocations(null);
+    } finally {
+      setMembershipLoading(false);
+    }
+  }
+
+  async function choosePrinting(group: InventoryOracleGroup, printing: InventoryPrinting) {
+    setSelectedPrintingByOracle((previous) => {
+      const next = { ...previous, [group.oracle_id]: printing.scryfall_id };
+      localStorage.setItem(PRINTING_SELECTION_KEY, JSON.stringify(next));
+      return next;
+    });
+    setPrintChangeTarget(null);
+    setMembershipLoading(true);
+    try {
+      setLocations(await fetchCardLocations(printing.scryfall_id));
+    } catch {
+      setLocations(null);
     } finally {
       setMembershipLoading(false);
     }
@@ -165,14 +230,52 @@ export default function InventoryPage() {
   function closeModal() {
     setSelected(null);
     setMatches(null);
-    setMemberships(null);
+    setLocations(null);
+    setPrintChangeTarget(null);
+  }
+
+  async function applyPrintChange(targetScryfallId: string) {
+    if (!selected || !printChangeTarget) return;
+    if (printChangeTarget.kind === "line") {
+      await changeInventoryLinePrinting(printChangeTarget.line.id, targetScryfallId);
+    } else {
+      await changeInventoryPrinting(printChangeTarget.sourceScryfallId, targetScryfallId);
+    }
+
+    const [pageGroups, selectedGroups] = await Promise.all([
+      fetchGroupedInventory(debouncedQ),
+      fetchGroupedInventory(selected.card.name),
+    ]);
+    const refreshed = selectedGroups.find((group) => group.oracle_id === selected.oracle_id);
+    setGroups(pageGroups);
+    if (!refreshed) {
+      closeModal();
+      return;
+    }
+
+    const oldStillExists = refreshed.printings.some(
+      (printing) => printing.scryfall_id === printChangeTarget.sourceScryfallId,
+    );
+    const nextSelectedId = oldStillExists
+      ? selectedPrintingByOracle[selected.oracle_id] ?? printChangeTarget.sourceScryfallId
+      : targetScryfallId;
+    setSelectedPrintingByOracle((previous) => {
+      const next = { ...previous, [selected.oracle_id]: nextSelectedId };
+      localStorage.setItem(PRINTING_SELECTION_KEY, JSON.stringify(next));
+      return next;
+    });
+    setSelected(refreshed);
+    setMatches(null);
+    setPrintChangeTarget(null);
+    setLocations(await fetchCardLocations(nextSelectedId));
   }
 
   async function runDeckFit() {
-    if (!selected) return;
+    const printing = selected ? selectedPrinting(selected) : undefined;
+    if (!printing) return;
     setMatchLoading(true);
     try {
-      setMatches(await fetchCardMatches(selected.scryfall_id));
+      setMatches(await fetchCardMatches(printing.scryfall_id));
     } catch {
       setMatches([]);
     } finally {
@@ -180,9 +283,7 @@ export default function InventoryPage() {
     }
   }
 
-  async function removeSelected() {
-    if (!selected) return;
-    const id = selected.id;
+  async function removeInventoryLine(id: number) {
     setDeletingId(id);
     try {
       await deleteInventoryLine(id);
@@ -210,6 +311,13 @@ export default function InventoryPage() {
   }
 
   const selectedCard = selected?.card;
+  const currentPrinting = selected ? selectedPrinting(selected) : undefined;
+  const correctionPrinting = selected && printChangeTarget
+    ? selected.printings.find((printing) => printing.scryfall_id === printChangeTarget.sourceScryfallId)
+    : undefined;
+  const correctionLines = printChangeTarget?.kind === "line"
+    ? [printChangeTarget.line]
+    : correctionPrinting?.lines ?? [];
 
   return (
     <div className="space-y-6">
@@ -262,14 +370,16 @@ export default function InventoryPage() {
         <div className="rounded-xl border border-red-500/30 bg-red-950/40 px-4 py-3 text-sm text-red-200">{err}</div>
       )}
 
-      {!loading && rows.length > 0 && (
+      {!loading && groups.length > 0 && (
         <p className="text-sm text-stone-400">
-          <span className="font-medium text-stone-200">{filteredRows.reduce((s, r) => s + r.quantity, 0)}</span> total
+          <span className="font-medium text-stone-200">{visibleGroups.reduce((sum, group) => sum + group.total_quantity, 0)}</span> physical cards
           &nbsp;·&nbsp;
-          <span className="font-medium text-stone-200">{filteredRows.length}</span> unique
+          <span className="font-medium text-stone-200">{visibleGroups.length}</span> unique cards
+          &nbsp;·&nbsp;
+          <span className="font-medium text-stone-200">{visibleGroups.reduce((sum, group) => sum + group.printing_count, 0)}</span> printings
           {activeFilterCount > 0 && (
             <span className="text-stone-500">
-              {" "}(filtered from {rows.length})
+              {" "}(filtered from {groups.length} cards)
               {" · "}
               <button
                 type="button"
@@ -286,7 +396,7 @@ export default function InventoryPage() {
       {/* Card grid */}
       {loading ? (
         <p className="py-20 text-center text-stone-500">Loading collection…</p>
-      ) : rows.length === 0 ? (
+      ) : groups.length === 0 ? (
         <p className="py-20 text-center text-stone-500">
           No cards yet.{" "}
           <Link className="text-ember-400 underline-offset-2 hover:underline" to="/import">
@@ -294,7 +404,7 @@ export default function InventoryPage() {
           </Link>
           .
         </p>
-      ) : filteredRows.length === 0 ? (
+      ) : visibleGroups.length === 0 ? (
         <p className="py-20 text-center text-stone-500">
           No cards match your filters.{" "}
           <button type="button" onClick={clearFilters} className="text-ember-400 hover:underline">
@@ -302,33 +412,39 @@ export default function InventoryPage() {
           </button>
         </p>
       ) : (
-        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6">
-          {filteredRows.map((row) => {
-            const c = row.card;
+        <div className="grid grid-cols-[repeat(auto-fill,minmax(155px,1fr))] gap-3 sm:grid-cols-[repeat(auto-fill,minmax(175px,1fr))] xl:grid-cols-[repeat(auto-fill,minmax(190px,1fr))]">
+          {visibleGroups.map((group) => {
+            const c = group.card;
+            const printing = selectedPrinting(group);
             return (
               <button
-                key={row.id}
+                key={group.oracle_id}
                 type="button"
-                onClick={() => void openCard(row)}
+                onClick={() => void openCard(group)}
                 className="group relative aspect-[5/7] w-full overflow-hidden rounded-xl ring-1 ring-white/10 transition duration-150 hover:scale-[1.03] hover:ring-ember-400/50 focus:outline-none focus-visible:ring-2 focus-visible:ring-ember-400"
               >
-                {c?.image_uri_normal ? (
+                {printing?.image_uri_normal ? (
                   <img
-                    src={c.image_uri_normal}
-                    alt={c.name ?? ""}
+                    src={printing.image_uri_normal}
+                    alt={c.name}
                     className="h-full w-full object-cover"
                     loading="lazy"
                   />
                 ) : (
                   <div className="flex h-full w-full items-center justify-center bg-ink-800 p-2">
                     <span className="text-center text-[11px] leading-tight text-stone-400">
-                      {c?.name ?? row.scryfall_id}
+                      {c.name}
                     </span>
                   </div>
                 )}
                 <div className="absolute bottom-1.5 right-1.5 rounded-full bg-black/75 px-2 py-0.5 font-mono text-xs font-semibold text-stone-200 ring-1 ring-white/10 backdrop-blur-sm">
-                  ×{row.quantity}
+                  ×{group.total_quantity}
                 </div>
+                {group.printing_count > 1 && (
+                  <div className="absolute bottom-1.5 left-1.5 rounded-full bg-black/75 px-2 py-0.5 text-[10px] font-semibold text-stone-300 ring-1 ring-white/10 backdrop-blur-sm">
+                    {group.printing_count} prints
+                  </div>
+                )}
               </button>
             );
           })}
@@ -453,21 +569,25 @@ export default function InventoryPage() {
             aria-label="Close"
             onClick={closeModal}
           />
-          <div className="relative flex max-h-[92vh] w-full max-w-2xl overflow-hidden rounded-2xl border border-white/10 bg-ink-900 shadow-card">
-            {/* Left: card image at natural aspect ratio — self-start prevents it stretching as right panel grows */}
-            <div className="relative w-56 shrink-0 self-start">
-              {selectedCard?.image_uri_normal ? (
-                <img
-                  src={selectedCard.image_uri_normal}
-                  alt={selectedCard.name ?? ""}
-                  className="w-full rounded-l-2xl"
-                />
-              ) : (
-                <div className="flex aspect-[5/7] w-full items-center justify-center rounded-l-2xl bg-ink-800 p-4">
-                  <span className="text-center text-xs text-stone-500">
-                    {selectedCard?.name ?? selected.scryfall_id}
-                  </span>
-                </div>
+          <div className="relative flex max-h-[92vh] w-full max-w-3xl flex-col overflow-hidden rounded-2xl border border-white/10 bg-ink-900 shadow-card sm:flex-row">
+            <div className="relative mx-auto w-44 shrink-0 self-start sm:mx-0 sm:w-64">
+              <PrintingCarousel
+                cardName={selectedCard?.name ?? "Card"}
+                printings={selected.printings}
+                selectedScryfallId={currentPrinting?.scryfall_id ?? null}
+                onSelect={(printing) => void choosePrinting(selected, printing)}
+              />
+              {currentPrinting && (
+                <button
+                  type="button"
+                  onClick={() => setPrintChangeTarget({
+                    kind: "printing",
+                    sourceScryfallId: currentPrinting.scryfall_id,
+                  })}
+                  className="mt-3 w-full rounded-xl border border-arcane-400/30 bg-arcane-500/10 px-3 py-2 text-xs font-medium text-arcane-200 transition hover:bg-arcane-500/20"
+                >
+                  Change print
+                </button>
               )}
             </div>
 
@@ -482,60 +602,129 @@ export default function InventoryPage() {
               </button>
 
               <div className="space-y-5 p-5 pt-10">
+                {printChangeTarget && correctionLines.length > 0 && (
+                  <PrintChangePicker
+                    sourceScryfallId={printChangeTarget.sourceScryfallId}
+                    title={printChangeTarget.kind === "line" ? "Change this inventory line" : "Change this entire printing"}
+                    description={printChangeTarget.kind === "line"
+                      ? `Move all ${printChangeTarget.line.quantity} copies in this ${printChangeTarget.line.foil ? "foil" : "nonfoil"} line to another printing.`
+                      : `Move all ${correctionPrinting?.total_quantity ?? 0} copies across ${correctionLines.length} inventory ${correctionLines.length === 1 ? "line" : "lines"}. Exact deck assignments will follow the corrected printing.`}
+                    requiresFoil={correctionLines.some((line) => line.foil)}
+                    requiresNonfoil={correctionLines.some((line) => !line.foil)}
+                    languages={correctionLines.flatMap((line) => line.language ? [line.language] : [])}
+                    onCancel={() => setPrintChangeTarget(null)}
+                    onApply={applyPrintChange}
+                  />
+                )}
+
                 {/* Name + qty */}
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0">
                     <h2 className="font-display text-xl font-semibold leading-tight text-stone-100">
-                      {selectedCard?.name ?? selected.scryfall_id}
+                      {selectedCard?.name ?? selected.oracle_id}
                     </h2>
                     {selectedCard?.type_line && (
                       <p className="mt-1 text-xs text-stone-500">{selectedCard.type_line}</p>
                     )}
                   </div>
                   <div className="shrink-0 rounded-xl border border-white/10 bg-ink-950/60 px-3 py-2 text-center">
-                    <div className="font-mono text-xl font-bold text-stone-100">×{selected.quantity}</div>
+                    <div className="font-mono text-xl font-bold text-stone-100">×{locations?.owned_total ?? selected.total_quantity}</div>
                     <div className="text-[10px] uppercase tracking-wider text-stone-500">owned</div>
                   </div>
                 </div>
 
                 {/* Action buttons */}
-                <div className="flex gap-2">
+                <div>
                   <button
                     type="button"
                     onClick={() => void runDeckFit()}
                     disabled={matchLoading}
-                    className="flex-1 rounded-xl border border-ember-400/30 bg-ember-500/10 py-2.5 text-sm font-medium text-ember-200 transition hover:bg-ember-500/20 disabled:opacity-50"
+                    className="w-full rounded-xl border border-ember-400/30 bg-ember-500/10 py-2.5 text-sm font-medium text-ember-200 transition hover:bg-ember-500/20 disabled:opacity-50"
                   >
                     {matchLoading ? "Scoring…" : "Deck fit"}
                   </button>
-                  <button
-                    type="button"
-                    disabled={deletingId === selected.id}
-                    onClick={() => void removeSelected()}
-                    className="rounded-xl border border-red-500/30 px-5 py-2.5 text-sm font-medium text-red-300 transition hover:bg-red-950/40 disabled:opacity-50"
-                  >
-                    {deletingId === selected.id ? "…" : "Remove"}
-                  </button>
                 </div>
 
-                {/* In your decks */}
+                {currentPrinting && (
+                  <div>
+                    <p className="text-xs font-medium uppercase tracking-wider text-stone-500">This printing</p>
+                    <div className="mt-2 space-y-2">
+                      {currentPrinting.lines.map((line) => (
+                        <div key={line.id} className="flex items-center justify-between gap-3 rounded-xl border border-white/5 bg-ink-950/55 px-3 py-2 text-xs">
+                          <div className="min-w-0">
+                            <p className="font-medium text-stone-200">
+                              {line.quantity} {line.quantity === 1 ? "copy" : "copies"}
+                              {line.foil ? " · Foil" : " · Nonfoil"}
+                            </p>
+                            <p className="mt-0.5 truncate text-stone-500">
+                              {[line.condition, line.language?.toUpperCase()].filter(Boolean).join(" · ") || "No condition details"}
+                            </p>
+                          </div>
+                          <div className="flex shrink-0 gap-1.5">
+                            <button
+                              type="button"
+                              onClick={() => setPrintChangeTarget({
+                                kind: "line",
+                                sourceScryfallId: currentPrinting.scryfall_id,
+                                line,
+                              })}
+                              className="rounded-lg border border-arcane-400/25 px-2.5 py-1.5 text-[10px] font-medium text-arcane-300 transition hover:bg-arcane-950/40"
+                            >
+                              Change print
+                            </button>
+                            <button
+                              type="button"
+                              disabled={deletingId === line.id}
+                              onClick={() => void removeInventoryLine(line.id)}
+                              className="rounded-lg border border-red-500/25 px-2.5 py-1.5 text-[10px] font-medium text-red-300 transition hover:bg-red-950/40 disabled:opacity-50"
+                            >
+                              {deletingId === line.id ? "Removing…" : "Remove line"}
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Physical locations and deck demand */}
                 <div>
-                  <p className="text-xs font-medium uppercase tracking-wider text-stone-500">In your decks</p>
+                  <p className="text-xs font-medium uppercase tracking-wider text-stone-500">Copy locations</p>
                   <div className="mt-2">
                     {membershipLoading ? (
                       <p className="text-xs text-stone-500">Loading…</p>
-                    ) : !memberships || memberships.length === 0 ? (
-                      <p className="text-xs text-stone-500">Not in any decks.</p>
+                    ) : !locations ? (
+                      <p className="text-xs text-stone-500">Location details unavailable.</p>
                     ) : (
-                      <ul className="space-y-0.5">
-                        {memberships.map((m) => (
+                      <div className="space-y-3">
+                        <div className="grid grid-cols-2 gap-2 text-xs sm:grid-cols-4">
+                          <div className="rounded-lg bg-ink-950/55 p-2"><span className="block text-stone-500">In decks</span><strong className="text-emerald-300">{locations.grabbed_total}</strong></div>
+                          <div className="rounded-lg bg-ink-950/55 p-2"><span className="block text-stone-500">In bulk</span><strong className="text-stone-200">{locations.bulk_total}</strong></div>
+                          <div className="rounded-lg bg-ink-950/55 p-2"><span className="block text-stone-500">Free</span><strong className="text-arcane-300">{locations.freely_available}</strong></div>
+                          <div className="rounded-lg bg-ink-950/55 p-2"><span className="block text-stone-500">Proxies</span><strong className="text-violet-300">{locations.proxy_total}</strong></div>
+                        </div>
+                        {locations.pending_total > 0 && (
+                          <p className="text-xs text-amber-300">
+                            {locations.pending_total} bulk {locations.pending_total === 1 ? "copy is" : "copies are"} earmarked to grab
+                            {locations.demand_shortfall > 0 ? ` · ${locations.demand_shortfall} still missing` : ""}.
+                          </p>
+                        )}
+                        {locations.decks.length === 0 ? <p className="text-xs text-stone-500">Not used by any decks.</p> : <ul className="space-y-1">
+                        {locations.decks.map((m) => (
                           <li key={m.deck_id}>
                             <Link
                               to={`/decks/${m.deck_id}`}
                               onClick={closeModal}
                               className="flex items-center gap-2 rounded-lg px-2 py-1.5 text-sm text-arcane-300 transition hover:bg-white/5"
                             >
-                              {m.deck_name}
+                              <span className="min-w-0 flex-1 truncate">{m.deck_name}</span>
+                              <span className="text-[10px] text-stone-500">
+                                {m.grabbed_quantity ? `${m.grabbed_quantity} grabbed` : ""}
+                                {m.grabbed_quantity && (m.pending_quantity || m.proxy_quantity) ? " · " : ""}
+                                {m.pending_quantity ? `${m.pending_quantity} needed` : ""}
+                                {(m.grabbed_quantity || m.pending_quantity) && m.proxy_quantity ? " · " : ""}
+                                {m.proxy_quantity ? `${m.proxy_quantity} proxy` : ""}
+                              </span>
                               {m.is_commander && (
                                 <span className="rounded bg-arcane-500/20 px-1.5 py-0.5 text-[10px] text-arcane-200">
                                   CMD
@@ -544,7 +733,8 @@ export default function InventoryPage() {
                             </Link>
                           </li>
                         ))}
-                      </ul>
+                        </ul>}
+                      </div>
                     )}
                   </div>
                 </div>

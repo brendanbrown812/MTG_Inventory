@@ -107,6 +107,7 @@ class _Entry:
     oracle: OracleCard
     printing: CardPrinting
     quantity: int
+    proxy_quantity: int
     is_commander: bool
 
 
@@ -193,6 +194,21 @@ def commander_eligibility(printing: CardPrinting) -> tuple[bool, str]:
     ):
         return True, "legendary Vehicle or Spacecraft with printed power/toughness"
     return False, "not a legendary creature or another permitted commander card"
+
+
+def commander_selection_eligibility(printing: CardPrinting) -> tuple[bool, str]:
+    """Return whether a printing can be selected as a Commander commander."""
+    eligible, reason = commander_eligibility(printing)
+    if not eligible:
+        return False, reason
+
+    legalities = _json_object(printing.oracle.legalities_json)
+    status = legalities.get("commander")
+    if status == "legal":
+        return True, reason
+    if status:
+        return False, f"Commander format legality is {status}"
+    return False, "Commander format legality data is unavailable"
 
 
 def _partner_compatible(commanders: list[_Entry]) -> bool:
@@ -335,12 +351,14 @@ def analyze_commander_deck(db: Session, deck: Deck) -> dict[str, Any]:
         existing = entries_by_oracle.get(dc.oracle_id)
         if existing:
             existing.quantity += dc.quantity
+            existing.proxy_quantity += dc.proxy_quantity
             existing.is_commander = existing.is_commander or dc.is_commander
         else:
             entries_by_oracle[dc.oracle_id] = _Entry(
                 oracle=dc.oracle_card,
                 printing=dc.card,
                 quantity=dc.quantity,
+                proxy_quantity=dc.proxy_quantity,
                 is_commander=dc.is_commander,
             )
 
@@ -365,7 +383,7 @@ def analyze_commander_deck(db: Session, deck: Deck) -> dict[str, Any]:
                 printing = db.query(CardPrinting).filter(CardPrinting.oracle_id == oracle_id).first()
             oracle = db.get(OracleCard, oracle_id)
             if printing and oracle:
-                entries_by_oracle[oracle_id] = _Entry(oracle, printing, 1, True)
+                entries_by_oracle[oracle_id] = _Entry(oracle, printing, 1, 0, True)
 
     entries = sorted(entries_by_oracle.values(), key=lambda entry: (entry.oracle.name, entry.oracle.oracle_id))
     commanders = sorted(
@@ -454,7 +472,8 @@ def analyze_commander_deck(db: Session, deck: Deck) -> dict[str, Any]:
             ))
 
     required_by_oracle = {
-        entry.oracle.oracle_id: max(0, entry.quantity) for entry in entries
+        entry.oracle.oracle_id: max(0, entry.quantity - entry.proxy_quantity)
+        for entry in entries
     }
     owned_rows = (
         db.query(CardPrinting.oracle_id, func.coalesce(func.sum(InventoryLine.quantity), 0))

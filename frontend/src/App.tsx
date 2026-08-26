@@ -22,7 +22,7 @@ function AppShell() {
   return (
     <div className="min-h-screen bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-ink-800 via-ink-950 to-ink-950">
       <header className="sticky top-0 z-40 border-b border-white/5 bg-ink-950/80 backdrop-blur-md">
-        <div className="mx-auto flex max-w-6xl items-center justify-between gap-6 px-4 py-4 sm:px-6">
+        <div className="flex w-full items-center justify-between gap-6 px-4 py-4 sm:px-6 lg:px-8 2xl:px-10">
           <Link
             to="/"
             className="group flex items-baseline gap-3 rounded-lg outline-none ring-ember-400/0 transition hover:opacity-90 focus-visible:ring-2 focus-visible:ring-ember-400/50"
@@ -55,7 +55,7 @@ function AppShell() {
           </nav>
         </div>
       </header>
-      <main className="mx-auto max-w-6xl px-4 py-8 sm:px-6 sm:py-10">
+      <main className="w-full px-4 py-8 sm:px-6 sm:py-10 lg:px-8 2xl:px-10">
         <Routes>
           <Route path="/" element={<InventoryPage />} />
           <Route path="/import" element={<ImportPage />} />

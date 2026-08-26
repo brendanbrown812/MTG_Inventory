@@ -1,4 +1,4 @@
-const base = "";
+const base = (import.meta.env.VITE_API_BASE ?? "").replace(/\/$/, "");
 
 const API_KEY_STORAGE = "spellbinder_api_key";
 const browserFetch = globalThis.fetch.bind(globalThis);
@@ -38,6 +38,8 @@ export type Card = {
   colors: string;
   color_identity: string;
   rarity: string | null;
+  set_code: string | null;
+  collector_number: string | null;
   image_uri_normal: string | null;
 };
 
@@ -53,6 +55,29 @@ export type InventoryLine = {
   card: Card | null;
 };
 
+export type InventoryPrinting = {
+  scryfall_id: string;
+  set_code: string | null;
+  collector_number: string | null;
+  rarity: string | null;
+  language: string | null;
+  image_uri_normal: string | null;
+  total_quantity: number;
+  foil_quantity: number;
+  nonfoil_quantity: number;
+  card: Card;
+  lines: InventoryLine[];
+};
+
+export type InventoryOracleGroup = {
+  oracle_id: string;
+  total_quantity: number;
+  printing_count: number;
+  inventory_line_count: number;
+  card: Card;
+  printings: InventoryPrinting[];
+};
+
 export type Deck = {
   id: number;
   name: string;
@@ -60,15 +85,28 @@ export type Deck = {
   status: string;
   notes: string | null;
   commander_scryfall_id: string | null;
+  commander_name: string | null;
 };
 
 export type DeckCard = {
   id: number;
   scryfall_id: string;
   quantity: number;
+  grabbed_quantity: number;
+  proxy_quantity: number;
   is_commander: boolean;
   is_sideboard: boolean;
   card: Card | null;
+  allocations: DeckCardAllocation[];
+};
+
+export type DeckCardAllocation = {
+  id: number;
+  status: "pending" | "grabbed" | "proxy";
+  quantity: number;
+  scryfall_id: string | null;
+  foil: boolean | null;
+  printing: Card | null;
 };
 
 export type DeckDetail = Deck & { cards: DeckCard[] };
@@ -178,6 +216,14 @@ export async function fetchInventory(q: string, sort: string): Promise<Inventory
   return r.json();
 }
 
+export async function fetchGroupedInventory(q: string): Promise<InventoryOracleGroup[]> {
+  const p = new URLSearchParams();
+  if (q) p.set("q", q);
+  const r = await fetch(`${base}/api/inventory/grouped?${p}`);
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+
 export async function deleteInventoryLine(id: number): Promise<void> {
   const r = await fetch(`${base}/api/inventory/${id}`, { method: "DELETE" });
   if (!r.ok) throw new Error(await r.text());
@@ -185,6 +231,58 @@ export async function deleteInventoryLine(id: number): Promise<void> {
 
 export async function clearInventory(): Promise<{ deleted: number }> {
   const r = await fetch(`${base}/api/inventory/clear`, { method: "POST" });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+
+export type PrintingOption = {
+  scryfall_id: string;
+  name: string;
+  set_name: string;
+  set_code: string | null;
+  collector_number: string | null;
+  released_at: string | null;
+  language: string | null;
+  image_uri_normal: string | null;
+  foil: boolean;
+  nonfoil: boolean;
+};
+
+export type InventoryPrintingChangeResult = {
+  changed_lines: number;
+  moved_quantity: number;
+  source_scryfall_id: string;
+  target_scryfall_id: string;
+};
+
+export async function fetchPrintingOptions(scryfallId: string): Promise<PrintingOption[]> {
+  const r = await fetch(`${base}/api/cards/${encodeURIComponent(scryfallId)}/print-options`);
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+
+export async function changeInventoryLinePrinting(
+  lineId: number,
+  targetScryfallId: string,
+): Promise<InventoryPrintingChangeResult> {
+  const r = await fetch(`${base}/api/inventory/lines/${lineId}/printing`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ target_scryfall_id: targetScryfallId }),
+  });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+
+export async function changeInventoryPrinting(
+  sourceScryfallId: string,
+  targetScryfallId: string,
+): Promise<InventoryPrintingChangeResult> {
+  const r = await fetch(`${base}/api/inventory/printings/${encodeURIComponent(sourceScryfallId)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ target_scryfall_id: targetScryfallId }),
+  });
   if (!r.ok) throw new Error(await r.text());
   return r.json();
 }
@@ -308,6 +406,17 @@ export async function removeDeckCard(deckId: number, deckCardId: number): Promis
   return r.json();
 }
 
+export async function setDeckCommander(deckId: number, deckCardId: number): Promise<DeckDetail> {
+  const r = await fetch(`${base}/api/decks/${deckId}/cards/${deckCardId}/commander`, {
+    method: "PUT",
+  });
+  if (!r.ok) {
+    const payload = await r.json().catch(() => null) as { detail?: string } | null;
+    throw new Error(payload?.detail ?? "Could not select that commander");
+  }
+  return r.json();
+}
+
 export async function deleteDeck(id: number): Promise<void> {
   const r = await fetch(`${base}/api/decks/${id}`, { method: "DELETE" });
   if (!r.ok) throw new Error(await r.text());
@@ -317,10 +426,98 @@ export type CardDeckMembership = {
   deck_id: number;
   deck_name: string;
   is_commander: boolean;
+  quantity: number;
+  grabbed_quantity: number;
+  proxy_quantity: number;
+  pending_quantity: number;
+};
+
+export type CardLocationSummary = {
+  scryfall_id: string;
+  oracle_id: string;
+  owned_total: number;
+  grabbed_total: number;
+  bulk_total: number;
+  pending_total: number;
+  proxy_total: number;
+  freely_available: number;
+  demand_shortfall: number;
+  any_printing?: Record<"grabbed" | "pending" | "proxy", number>;
+  printings?: Array<{
+    scryfall_id: string;
+    set_code: string | null;
+    collector_number: string | null;
+    image_uri_normal: string | null;
+    owned_total: number;
+    grabbed_quantity: number;
+    pending_quantity: number;
+    proxy_quantity: number;
+    freely_available: number;
+    demand_shortfall: number;
+  }>;
+  decks: CardDeckMembership[];
 };
 
 export async function fetchCardDecks(scryfallId: string): Promise<CardDeckMembership[]> {
   const r = await fetch(`${base}/api/cards/${encodeURIComponent(scryfallId)}/decks`);
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+
+export async function fetchCardLocations(
+  scryfallId: string,
+  includePrintings = false,
+): Promise<CardLocationSummary> {
+  const suffix = includePrintings ? "?include_printings=true" : "";
+  const r = await fetch(
+    `${base}/api/cards/${encodeURIComponent(scryfallId)}/locations${suffix}`,
+  );
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+
+export async function updateDeckCardAssembly(
+  deckId: number,
+  deckCardId: number,
+  body: { grabbed_quantity: number; proxy_quantity: number },
+): Promise<DeckCard> {
+  const r = await fetch(`${base}/api/decks/${deckId}/cards/${deckCardId}/assembly?compact=true`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+
+export async function replaceDeckCardAllocations(
+  deckId: number,
+  deckCardId: number,
+  allocations: Array<{
+    status: "pending" | "grabbed" | "proxy";
+    quantity: number;
+    scryfall_id: string | null;
+    foil: boolean | null;
+  }>,
+): Promise<DeckDetail> {
+  const r = await fetch(`${base}/api/decks/${deckId}/cards/${deckCardId}/allocations`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ allocations }),
+  });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+
+export async function updateDeckAssembly(
+  deckId: number,
+  cards: { deck_card_id: number; grabbed_quantity: number; proxy_quantity: number }[],
+): Promise<DeckDetail> {
+  const r = await fetch(`${base}/api/decks/${deckId}/assembly`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ cards }),
+  });
   if (!r.ok) throw new Error(await r.text());
   return r.json();
 }
@@ -352,14 +549,12 @@ export async function importDeckCsvNew(
   deckName: string,
   format: string,
   status: string,
-  addToCollection: boolean
 ): Promise<{ deck: DeckDetail; row_errors: DeckCsvRowError[] }> {
   const fd = new FormData();
   fd.append("file", file);
   fd.append("deck_name", deckName);
   fd.append("format", format);
   fd.append("status", status);
-  fd.append("add_to_collection", addToCollection ? "true" : "false");
   const r = await fetch(`${base}/api/decks/import-csv`, { method: "POST", body: fd });
   if (!r.ok) throw new Error(await r.text());
   return r.json();
@@ -368,11 +563,9 @@ export async function importDeckCsvNew(
 export async function importDeckCsvAppend(
   deckId: number,
   file: File,
-  addToCollection: boolean,
 ): Promise<{ deck: DeckDetail; row_errors: DeckCsvRowError[] }> {
   const fd = new FormData();
   fd.append("file", file);
-  fd.append("add_to_collection", addToCollection ? "true" : "false");
   const r = await fetch(`${base}/api/decks/${deckId}/import-csv`, { method: "POST", body: fd });
   if (!r.ok) throw new Error(await r.text());
   return r.json();
@@ -383,14 +576,12 @@ export async function importDeckTextNew(
   deckName: string,
   format: string,
   status: string,
-  addToCollection: boolean
 ): Promise<{ deck: DeckDetail; row_errors: DeckCsvRowError[] }> {
   const fd = new FormData();
   fd.append("text", deckListText);
   fd.append("deck_name", deckName);
   fd.append("format", format);
   fd.append("status", status);
-  fd.append("add_to_collection", addToCollection ? "true" : "false");
   const r = await fetch(`${base}/api/decks/import-text`, { method: "POST", body: fd });
   if (!r.ok) throw new Error(await r.text());
   return r.json();
@@ -399,11 +590,9 @@ export async function importDeckTextNew(
 export async function importDeckTextAppend(
   deckId: number,
   deckListText: string,
-  addToCollection: boolean,
 ): Promise<{ deck: DeckDetail; row_errors: DeckCsvRowError[] }> {
   const fd = new FormData();
   fd.append("text", deckListText);
-  fd.append("add_to_collection", addToCollection ? "true" : "false");
   const r = await fetch(`${base}/api/decks/${deckId}/import-text`, { method: "POST", body: fd });
   if (!r.ok) throw new Error(await r.text());
   return r.json();

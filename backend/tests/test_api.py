@@ -83,6 +83,62 @@ def test_inventory_listing_and_clear(client: TestClient) -> None:
     assert client.get("/api/inventory").json() == []
 
 
+def test_grouped_inventory_combines_oracle_printings_and_foil_lines(
+    client: TestClient,
+) -> None:
+    _add_cached_card()
+    with SessionLocal() as db:
+        first = db.get(CardPrinting, SCRYFALL_ID)
+        first.set_code = "one"
+        first.collector_number = "1"
+        first.image_uri_normal = "https://cards.test/one.jpg"
+        db.add(CardPrinting(
+            scryfall_id=SECOND_PRINTING_ID,
+            oracle_id=first.oracle_id,
+            set_code="two",
+            collector_number="2",
+            rarity="uncommon",
+            language="en",
+            image_uri_normal="https://cards.test/two.jpg",
+        ))
+        db.add_all([
+            InventoryLine(
+                scryfall_id=SCRYFALL_ID, quantity=2, foil=False,
+                condition="near_mint", language="en",
+            ),
+            InventoryLine(
+                scryfall_id=SCRYFALL_ID, quantity=1, foil=True,
+                condition="near_mint", language="en",
+            ),
+            InventoryLine(
+                scryfall_id=SECOND_PRINTING_ID, quantity=3, foil=False,
+                condition="good", language="en",
+            ),
+        ])
+        db.commit()
+
+    response = client.get("/api/inventory/grouped?q=ring")
+    assert response.status_code == 200, response.text
+    groups = response.json()
+    assert len(groups) == 1
+    group = groups[0]
+    assert group["oracle_id"] == "00000000-0000-4000-8000-000000000002"
+    assert group["total_quantity"] == 6
+    assert group["printing_count"] == 2
+    assert group["inventory_line_count"] == 3
+    assert group["card"]["name"] == "Test Ring"
+
+    first_printing, second_printing = group["printings"]
+    assert first_printing["scryfall_id"] == SCRYFALL_ID
+    assert first_printing["total_quantity"] == 3
+    assert first_printing["foil_quantity"] == 1
+    assert first_printing["nonfoil_quantity"] == 2
+    assert len(first_printing["lines"]) == 2
+    assert second_printing["scryfall_id"] == SECOND_PRINTING_ID
+    assert second_printing["total_quantity"] == 3
+    assert second_printing["foil_quantity"] == 0
+
+
 def test_manabox_import_merges_cached_card(client: TestClient) -> None:
     _add_cached_card()
     csv_text = (
@@ -267,6 +323,167 @@ def test_deck_merges_printings_of_the_same_oracle_card(client: TestClient) -> No
     assert [row["deck_name"] for row in memberships] == ["Oracle identity deck"]
 
 
+def test_selecting_commander_enforces_eligibility_legality_and_one_commander(
+    client: TestClient,
+) -> None:
+    fixtures = [
+        (
+            "40000000-0000-4000-8000-000000000001",
+            "50000000-0000-4000-8000-000000000001",
+            "First Captain",
+            "Legendary Creature — Human",
+            "legal",
+        ),
+        (
+            "40000000-0000-4000-8000-000000000002",
+            "50000000-0000-4000-8000-000000000002",
+            "Second Captain",
+            "Legendary Creature — Elf",
+            "legal",
+        ),
+        (
+            "40000000-0000-4000-8000-000000000003",
+            "50000000-0000-4000-8000-000000000003",
+            "Ordinary Rock",
+            "Artifact",
+            "legal",
+        ),
+        (
+            "40000000-0000-4000-8000-000000000004",
+            "50000000-0000-4000-8000-000000000004",
+            "Banned Captain",
+            "Legendary Creature — Human",
+            "banned",
+        ),
+    ]
+    with SessionLocal() as db:
+        for scryfall_id, oracle_id, name, type_line, commander_legality in fixtures:
+            oracle = OracleCard(
+                oracle_id=oracle_id,
+                name=name,
+                type_line=type_line,
+                legalities_json=f'{{"commander":"{commander_legality}"}}',
+            )
+            db.add(CardPrinting(scryfall_id=scryfall_id, oracle=oracle))
+        db.commit()
+
+    created = client.post("/api/decks", json={
+        "name": "Commander selection",
+        "format": "commander",
+        "cards": [
+            {"scryfall_id": scryfall_id, "quantity": 1}
+            for scryfall_id, *_rest in fixtures
+        ],
+    })
+    assert created.status_code == 200, created.text
+    deck = created.json()
+    entries = {entry["card"]["name"]: entry for entry in deck["cards"]}
+
+    ineligible = client.put(
+        f"/api/decks/{deck['id']}/cards/{entries['Ordinary Rock']['id']}/commander"
+    )
+    assert ineligible.status_code == 422
+    assert "cannot be the commander" in ineligible.json()["detail"]
+
+    banned = client.put(
+        f"/api/decks/{deck['id']}/cards/{entries['Banned Captain']['id']}/commander"
+    )
+    assert banned.status_code == 422
+    assert "legality is banned" in banned.json()["detail"]
+
+    selected = client.put(
+        f"/api/decks/{deck['id']}/cards/{entries['First Captain']['id']}/commander"
+    )
+    assert selected.status_code == 200, selected.text
+    assert selected.json()["commander_scryfall_id"] == fixtures[0][0]
+    assert [
+        entry["card"]["name"]
+        for entry in selected.json()["cards"]
+        if entry["is_commander"]
+    ] == ["First Captain"]
+
+    switched = client.patch(
+        f"/api/decks/{deck['id']}",
+        json={"commander_scryfall_id": fixtures[1][0]},
+    )
+    assert switched.status_code == 200, switched.text
+    assert [
+        entry["card"]["name"]
+        for entry in switched.json()["cards"]
+        if entry["is_commander"]
+    ] == ["Second Captain"]
+
+    second_entry = next(
+        entry for entry in switched.json()["cards"]
+        if entry["card"]["name"] == "Second Captain"
+    )
+    removed = client.delete(
+        f"/api/decks/{deck['id']}/cards/{second_entry['id']}"
+    )
+    assert removed.status_code == 200, removed.text
+    assert removed.json()["commander_scryfall_id"] is None
+    assert not any(entry["is_commander"] for entry in removed.json()["cards"])
+
+
+def test_create_and_add_card_routes_cannot_bypass_commander_validation(
+    client: TestClient,
+) -> None:
+    legal_id = "41000000-0000-4000-8000-000000000001"
+    other_legal_id = "41000000-0000-4000-8000-000000000002"
+    artifact_id = "41000000-0000-4000-8000-000000000003"
+    fixtures = [
+        (legal_id, "51000000-0000-4000-8000-000000000001", "Legal Captain", "Legendary Creature — Human"),
+        (other_legal_id, "51000000-0000-4000-8000-000000000002", "Other Captain", "Legendary Creature — Elf"),
+        (artifact_id, "51000000-0000-4000-8000-000000000003", "Commander-Shaped Rock", "Artifact"),
+    ]
+    with SessionLocal() as db:
+        for scryfall_id, oracle_id, name, type_line in fixtures:
+            db.add(CardPrinting(
+                scryfall_id=scryfall_id,
+                oracle=OracleCard(
+                    oracle_id=oracle_id,
+                    name=name,
+                    type_line=type_line,
+                    legalities_json='{"commander":"legal"}',
+                ),
+            ))
+        db.commit()
+
+    invalid_create = client.post("/api/decks", json={
+        "name": "Invalid commander create",
+        "cards": [{"scryfall_id": artifact_id, "is_commander": True}],
+    })
+    assert invalid_create.status_code == 422
+    assert "cannot be the commander" in invalid_create.json()["detail"]
+
+    multiple_create = client.post("/api/decks", json={
+        "name": "Multiple commanders",
+        "cards": [
+            {"scryfall_id": legal_id, "is_commander": True},
+            {"scryfall_id": other_legal_id, "is_commander": True},
+        ],
+    })
+    assert multiple_create.status_code == 422
+    assert "only one" in multiple_create.json()["detail"]
+
+    deck = client.post("/api/decks", json={
+        "name": "Add route validation",
+        "cards": [{"scryfall_id": legal_id}],
+    }).json()
+    invalid_add = client.post(f"/api/decks/{deck['id']}/cards", json=[
+        {"scryfall_id": artifact_id, "is_commander": True},
+    ])
+    assert invalid_add.status_code == 422
+    assert "cannot be the commander" in invalid_add.json()["detail"]
+
+    selected = client.post(f"/api/decks/{deck['id']}/cards", json=[
+        {"scryfall_id": other_legal_id, "is_commander": True},
+    ])
+    assert selected.status_code == 200, selected.text
+    assert selected.json()["commander_scryfall_id"] == other_legal_id
+    assert sum(card["is_commander"] for card in selected.json()["cards"]) == 1
+
+
 def test_moxfield_preview_preserves_printing_hints_and_can_create_deck(
     client: TestClient,
 ) -> None:
@@ -288,11 +505,11 @@ def test_moxfield_preview_preserves_printing_hints_and_can_create_deck(
         ),
     ]
     with SessionLocal() as db:
-        for printing_id, oracle_id, name, set_code, collector, _foil in fixtures:
+        for index, (printing_id, oracle_id, name, set_code, collector, _foil) in enumerate(fixtures):
             oracle = OracleCard(
                 oracle_id=oracle_id,
                 name=name,
-                type_line="Sorcery",
+                type_line="Legendary Creature — Avatar" if index == 0 else "Sorcery",
                 cmc=1,
                 colors="B",
                 color_identity="B",
@@ -353,6 +570,18 @@ def test_moxfield_preview_preserves_printing_hints_and_can_create_deck(
     assert sum(card["quantity"] for card in created.json()["cards"]) == 3
     assert sum(1 for card in created.json()["cards"] if card["is_commander"]) == 1
 
+    listed = client.get("/api/decks")
+    assert listed.status_code == 200, listed.text
+    listed_deck = next(deck for deck in listed.json() if deck["id"] == created.json()["id"])
+    assert listed_deck["commander_name"] == "Big Apple, 3 a.m."
+
+    renamed = client.patch(
+        f"/api/decks/{created.json()['id']}",
+        json={"name": "Renamed Moxfield assembly"},
+    )
+    assert renamed.status_code == 200, renamed.text
+    assert renamed.json()["name"] == "Renamed Moxfield assembly"
+
 
 def test_assembly_preview_uses_stale_local_card_without_network(
     client: TestClient,
@@ -372,6 +601,258 @@ def test_assembly_preview_uses_stale_local_card_without_network(
     assert response.status_code == 200, response.text
     assert response.json()["cards"][0]["scryfall_id"] == SCRYFALL_ID
     assert response.json()["row_errors"] == []
+
+
+def test_deck_assembly_tracks_physical_copies_proxies_and_demand(
+    client: TestClient,
+) -> None:
+    _add_cached_card()
+    with SessionLocal() as db:
+        db.add(InventoryLine(
+            scryfall_id=SCRYFALL_ID,
+            quantity=1,
+            foil=False,
+            language="en",
+        ))
+        db.commit()
+
+    created = client.post("/api/decks", json={
+        "name": "Allocation test",
+        "cards": [{"scryfall_id": SCRYFALL_ID, "quantity": 2}],
+    })
+    assert created.status_code == 200, created.text
+    deck = created.json()
+    entry = deck["cards"][0]
+    assert entry["grabbed_quantity"] == 0
+    assert entry["proxy_quantity"] == 0
+
+    grabbed = client.put(
+        f"/api/decks/{deck['id']}/cards/{entry['id']}/assembly?compact=true",
+        json={"grabbed_quantity": 1, "proxy_quantity": 0},
+    )
+    assert grabbed.status_code == 200, grabbed.text
+    assert grabbed.json()["id"] == entry["id"]
+    assert grabbed.json()["grabbed_quantity"] == 1
+    assert client.get("/api/inventory").json()[0]["quantity"] == 1
+
+    locations = client.get(f"/api/cards/{SCRYFALL_ID}/locations").json()
+    assert locations == {
+        "scryfall_id": SCRYFALL_ID,
+        "oracle_id": "00000000-0000-4000-8000-000000000002",
+        "owned_total": 1,
+        "grabbed_total": 1,
+        "bulk_total": 0,
+        "pending_total": 1,
+        "proxy_total": 0,
+        "freely_available": 0,
+        "demand_shortfall": 1,
+        "decks": [{
+            "deck_id": deck["id"],
+            "deck_name": "Allocation test",
+            "is_commander": False,
+            "quantity": 2,
+            "grabbed_quantity": 1,
+            "proxy_quantity": 0,
+            "pending_quantity": 1,
+        }],
+    }
+
+    second_copy = client.put(
+        f"/api/decks/{deck['id']}/cards/{entry['id']}/assembly",
+        json={"grabbed_quantity": 2, "proxy_quantity": 0},
+    )
+    assert second_copy.status_code == 200, second_copy.text
+    assert client.get("/api/inventory").json()[0]["quantity"] == 2
+
+    proxied = client.put(
+        f"/api/decks/{deck['id']}/cards/{entry['id']}/assembly",
+        json={"grabbed_quantity": 1, "proxy_quantity": 1},
+    )
+    assert proxied.status_code == 200, proxied.text
+    locations = client.get(f"/api/cards/{SCRYFALL_ID}/locations").json()
+    assert locations["owned_total"] == 2
+    assert locations["grabbed_total"] == 1
+    assert locations["bulk_total"] == 1
+    assert locations["freely_available"] == 1
+    assert locations["proxy_total"] == 1
+    assert locations["pending_total"] == 0
+
+
+def test_deck_card_exact_printing_allocations_are_replaceable(
+    client: TestClient,
+) -> None:
+    _add_cached_card()
+    with SessionLocal() as db:
+        oracle = db.get(OracleCard, "00000000-0000-4000-8000-000000000002")
+        db.add(CardPrinting(
+            scryfall_id=SECOND_PRINTING_ID,
+            oracle=oracle,
+            rarity="uncommon",
+            set_code="tst",
+            collector_number="2",
+        ))
+        db.add(InventoryLine(
+            scryfall_id=SCRYFALL_ID,
+            quantity=1,
+            foil=False,
+            language="en",
+        ))
+        db.commit()
+
+    created = client.post("/api/decks", json={
+        "name": "Exact printing deck",
+        "cards": [{"scryfall_id": SCRYFALL_ID, "quantity": 3}],
+    })
+    assert created.status_code == 200, created.text
+    deck = created.json()
+    entry = deck["cards"][0]
+    assert entry["allocations"] == [{
+        "id": entry["allocations"][0]["id"],
+        "status": "pending",
+        "quantity": 3,
+        "scryfall_id": None,
+        "foil": None,
+        "printing": None,
+    }]
+
+    replaced = client.put(
+        f"/api/decks/{deck['id']}/cards/{entry['id']}/allocations",
+        json={"allocations": [
+            {"status": "grabbed", "quantity": 1, "scryfall_id": SCRYFALL_ID, "foil": False},
+            {"status": "pending", "quantity": 1, "scryfall_id": None},
+            {"status": "proxy", "quantity": 1, "scryfall_id": SECOND_PRINTING_ID},
+        ]},
+    )
+    assert replaced.status_code == 200, replaced.text
+    updated_entry = replaced.json()["cards"][0]
+    assert updated_entry["grabbed_quantity"] == 1
+    assert updated_entry["proxy_quantity"] == 1
+    assert {
+        (row["status"], row["scryfall_id"], row["quantity"])
+        for row in updated_entry["allocations"]
+    } == {
+        ("grabbed", SCRYFALL_ID, 1),
+        ("pending", None, 1),
+        ("proxy", SECOND_PRINTING_ID, 1),
+    }
+    exact_rows = {
+        row["scryfall_id"]: row for row in updated_entry["allocations"]
+        if row["scryfall_id"]
+    }
+    assert exact_rows[SCRYFALL_ID]["printing"]["name"] == "Test Ring"
+    assert exact_rows[SCRYFALL_ID]["foil"] is False
+    assert exact_rows[SECOND_PRINTING_ID]["printing"]["scryfall_id"] == SECOND_PRINTING_ID
+
+    locations = client.get(
+        f"/api/cards/{SCRYFALL_ID}/locations?include_printings=true"
+    )
+    assert locations.status_code == 200, locations.text
+    location_body = locations.json()
+    assert location_body["any_printing"] == {
+        "grabbed": 0,
+        "pending": 1,
+        "proxy": 0,
+    }
+    by_printing = {
+        row["scryfall_id"]: row for row in location_body["printings"]
+    }
+    assert by_printing[SCRYFALL_ID]["grabbed_quantity"] == 1
+    assert by_printing[SECOND_PRINTING_ID]["proxy_quantity"] == 1
+
+
+def test_inventory_cannot_remove_assigned_copy_and_clear_releases_assignments(
+    client: TestClient,
+) -> None:
+    _add_cached_card()
+    created = client.post("/api/decks", json={
+        "name": "Physical deck",
+        "cards": [{"scryfall_id": SCRYFALL_ID}],
+    }).json()
+    entry = created["cards"][0]
+    response = client.put(
+        f"/api/decks/{created['id']}/cards/{entry['id']}/assembly",
+        json={"grabbed_quantity": 1, "proxy_quantity": 0},
+    )
+    assert response.status_code == 200, response.text
+    inventory_id = client.get("/api/inventory").json()[0]["id"]
+
+    blocked = client.delete(f"/api/inventory/{inventory_id}")
+    assert blocked.status_code == 409
+
+    cleared = client.post("/api/inventory/clear")
+    assert cleared.status_code == 200
+    deck = client.get(f"/api/decks/{created['id']}").json()
+    assert deck["cards"][0]["grabbed_quantity"] == 0
+    assert deck["cards"][0]["proxy_quantity"] == 0
+    assert client.get("/api/inventory").json() == []
+
+
+def test_deleting_deck_returns_grabbed_copy_to_bulk(client: TestClient) -> None:
+    _add_cached_card()
+    created = client.post("/api/decks", json={
+        "name": "Temporary deck",
+        "cards": [{"scryfall_id": SCRYFALL_ID}],
+    }).json()
+    entry = created["cards"][0]
+    assert client.put(
+        f"/api/decks/{created['id']}/cards/{entry['id']}/assembly",
+        json={"grabbed_quantity": 1, "proxy_quantity": 0},
+    ).status_code == 200
+
+    assert client.delete(f"/api/decks/{created['id']}").status_code == 200
+    locations = client.get(f"/api/cards/{SCRYFALL_ID}/locations").json()
+    assert locations["owned_total"] == 1
+    assert locations["grabbed_total"] == 0
+    assert locations["bulk_total"] == 1
+    assert locations["decks"] == []
+
+
+def test_deck_import_creates_demand_without_adding_inventory(client: TestClient) -> None:
+    _add_cached_card()
+    response = client.post(
+        "/api/decks/import-csv",
+        data={"deck_name": "Imported demand", "format": "commander", "status": "building"},
+        files={"file": ("deck.csv", f"Scryfall ID,Quantity\n{SCRYFALL_ID},2\n", "text/csv")},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["deck"]["cards"][0]["grabbed_quantity"] == 0
+    assert client.get("/api/inventory").json() == []
+
+
+def test_proxy_to_grabbed_does_not_consume_another_decks_earmarked_copy(
+    client: TestClient,
+) -> None:
+    _add_cached_card()
+    with SessionLocal() as db:
+        db.add(InventoryLine(
+            scryfall_id=SCRYFALL_ID, quantity=1, foil=False, language="en"
+        ))
+        db.commit()
+    pending_deck = client.post("/api/decks", json={
+        "name": "Pending deck",
+        "cards": [{"scryfall_id": SCRYFALL_ID}],
+    }).json()
+    proxy_deck = client.post("/api/decks", json={
+        "name": "Proxy deck",
+        "cards": [{"scryfall_id": SCRYFALL_ID}],
+    }).json()
+    proxy_entry = proxy_deck["cards"][0]
+    assert client.put(
+        f"/api/decks/{proxy_deck['id']}/cards/{proxy_entry['id']}/assembly",
+        json={"grabbed_quantity": 0, "proxy_quantity": 1},
+    ).status_code == 200
+
+    grabbed = client.put(
+        f"/api/decks/{proxy_deck['id']}/cards/{proxy_entry['id']}/assembly",
+        json={"grabbed_quantity": 1, "proxy_quantity": 0},
+    )
+    assert grabbed.status_code == 200, grabbed.text
+    locations = client.get(f"/api/cards/{SCRYFALL_ID}/locations").json()
+    assert locations["owned_total"] == 2
+    assert locations["grabbed_total"] == 1
+    assert locations["pending_total"] == 1
+    assert locations["freely_available"] == 0
+    assert locations["decks"][0]["deck_id"] == pending_deck["id"]
 
 
 def test_request_limits_are_enforced(client: TestClient) -> None:

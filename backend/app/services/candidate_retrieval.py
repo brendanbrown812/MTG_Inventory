@@ -22,6 +22,7 @@ from app.mechanics.profile import (
 )
 from app.models import (
     CardPrinting,
+    DeckCard,
     InventoryLine,
     MechanicProfileRecord,
     OracleCard,
@@ -33,7 +34,7 @@ from app.logging_setup import get_logger
 from app.services.semantic_index import current_card_vectors, get_or_create_query_vector
 
 
-RETRIEVAL_VERSION = "1.1.0"
+RETRIEVAL_VERSION = "1.2.0"
 DEFAULT_LIMIT = 200
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
 _CORE_ROLES = {
@@ -248,6 +249,29 @@ def retrieve_owned_candidates(
         .group_by(OracleCard.oracle_id, MechanicProfileRecord.id)
         .all()
     )
+    reserved_by_oracle = {
+        oracle_id: int(quantity or 0)
+        for oracle_id, quantity in (
+            db.query(
+                DeckCard.oracle_id,
+                func.sum(DeckCard.quantity - DeckCard.proxy_quantity),
+            )
+            .group_by(DeckCard.oracle_id)
+            .all()
+        )
+    }
+    physical_owned_by_oracle = {
+        oracle.oracle_id: int(quantity or 0)
+        for _, oracle, _, quantity in rows
+    }
+    rows = [
+        (printing, oracle, profile, max(
+            0,
+            int(quantity or 0) - reserved_by_oracle.get(oracle.oracle_id, 0),
+        ))
+        for printing, oracle, profile, quantity in rows
+        if int(quantity or 0) - reserved_by_oracle.get(oracle.oracle_id, 0) > 0
+    ]
 
     commander_identity: set[str] | None = None
     commander_found = commander_name is None
@@ -463,6 +487,8 @@ def retrieve_owned_candidates(
             "color_identity": oracle.color_identity,
             "keywords": keywords,
             "owned_quantity": quantity,
+            "physical_owned_quantity": physical_owned_by_oracle.get(oracle.oracle_id, quantity),
+            "reserved_quantity": reserved_by_oracle.get(oracle.oracle_id, 0),
             "deterministic_roles": sorted(raw_deterministic_roles),
             "mechanic_profile": profile.model_dump(mode="json") if profile else None,
             "retrieval": {

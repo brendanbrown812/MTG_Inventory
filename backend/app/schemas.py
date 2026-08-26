@@ -1,4 +1,4 @@
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -15,6 +15,8 @@ class CardOut(BaseModel):
     colors: str
     color_identity: str
     rarity: str | None
+    set_code: str | None = None
+    collector_number: str | None = None
     image_uri_normal: str | None
 
 class InventoryLineOut(BaseModel):
@@ -30,11 +32,58 @@ class InventoryLineOut(BaseModel):
     collector_number: str | None
     card: CardOut | None
 
+
+class InventoryPrintingOut(BaseModel):
+    scryfall_id: str
+    set_code: str | None
+    collector_number: str | None
+    rarity: str | None
+    language: str | None
+    image_uri_normal: str | None
+    total_quantity: int
+    foil_quantity: int
+    nonfoil_quantity: int
+    card: CardOut
+    lines: list[InventoryLineOut]
+
+
+class InventoryOracleGroupOut(BaseModel):
+    oracle_id: str
+    total_quantity: int
+    printing_count: int
+    inventory_line_count: int
+    card: CardOut
+    printings: list[InventoryPrintingOut]
+
 class DeckCardIn(BaseModel):
     scryfall_id: str = Field(min_length=36, max_length=36)
     quantity: int = Field(default=1, ge=1, le=999)
     is_commander: bool = False
     is_sideboard: bool = False
+
+
+class DeckCardAssemblyUpdate(BaseModel):
+    grabbed_quantity: int = Field(default=0, ge=0, le=999)
+    proxy_quantity: int = Field(default=0, ge=0, le=999)
+
+
+class DeckAssemblyEntryUpdate(DeckCardAssemblyUpdate):
+    deck_card_id: int = Field(ge=1)
+
+
+class DeckAssemblyBatchUpdate(BaseModel):
+    cards: list[DeckAssemblyEntryUpdate] = Field(min_length=1, max_length=1_000)
+
+
+class DeckCardAllocationIn(BaseModel):
+    status: Literal["pending", "grabbed", "proxy"]
+    quantity: int = Field(ge=1, le=999)
+    scryfall_id: str | None = Field(default=None, min_length=36, max_length=36)
+    foil: bool | None = None
+
+
+class DeckCardAllocationReplace(BaseModel):
+    allocations: list[DeckCardAllocationIn] = Field(min_length=1, max_length=1_000)
 
 
 class DeckCreate(BaseModel):
@@ -63,6 +112,7 @@ class DeckOut(BaseModel):
     status: str
     notes: str | None
     commander_scryfall_id: str | None
+    commander_name: str | None = None
 
 class DeckDetailOut(DeckOut):
     cards: list["DeckCardOut"] = Field(default_factory=list)
@@ -74,11 +124,26 @@ class DeckCardOut(BaseModel):
     id: int
     scryfall_id: str
     quantity: int
+    grabbed_quantity: int
+    proxy_quantity: int
     is_commander: bool
     is_sideboard: bool
     card: CardOut | None
+    allocations: list["DeckCardAllocationOut"] = Field(default_factory=list)
+
+
+class DeckCardAllocationOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    status: Literal["pending", "grabbed", "proxy"]
+    quantity: int
+    scryfall_id: str | None
+    foil: bool | None
+    printing: CardOut | None
 
 DeckDetailOut.model_rebuild()
+DeckCardOut.model_rebuild()
 
 
 class ImportRowResult(BaseModel):
@@ -98,6 +163,30 @@ class ImportResult(BaseModel):
 
 class ClearInventoryResult(BaseModel):
     deleted: int
+
+
+class PrintingOptionOut(BaseModel):
+    scryfall_id: str
+    name: str
+    set_name: str
+    set_code: str | None = None
+    collector_number: str | None = None
+    released_at: str | None = None
+    language: str | None = None
+    image_uri_normal: str | None = None
+    foil: bool = False
+    nonfoil: bool = False
+
+
+class InventoryPrintingChange(BaseModel):
+    target_scryfall_id: str = Field(min_length=36, max_length=36)
+
+
+class InventoryPrintingChangeOut(BaseModel):
+    changed_lines: int
+    moved_quantity: int
+    source_scryfall_id: str
+    target_scryfall_id: str
 
 
 class CardResolveMatch(BaseModel):

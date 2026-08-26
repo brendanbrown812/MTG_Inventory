@@ -395,3 +395,202 @@ def run_migrations(eng) -> None:
                 )
             conn.execute(text("INSERT INTO schema_versions (version) VALUES (8)"))
             conn.commit()
+
+        if 9 not in applied:
+            deck_card_columns = {
+                row[1] for row in conn.exec_driver_sql(
+                    "PRAGMA table_info('deck_cards')"
+                ).fetchall()
+            }
+            for column in ("grabbed_quantity", "proxy_quantity"):
+                if column not in deck_card_columns:
+                    conn.exec_driver_sql(
+                        f"ALTER TABLE deck_cards ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0"
+                    )
+            invalid = conn.execute(text("""
+                SELECT COUNT(*) FROM deck_cards
+                WHERE grabbed_quantity < 0 OR proxy_quantity < 0
+                   OR grabbed_quantity + proxy_quantity > quantity
+            """)).scalar_one()
+            if invalid:
+                raise RuntimeError(
+                    f"Migration 9 deck allocation validation failed: invalid_rows={invalid}"
+                )
+            conn.execute(text("INSERT INTO schema_versions (version) VALUES (9)"))
+            conn.commit()
+
+        if 10 not in applied:
+            table_name = "deck_card_allocations"
+            required_columns = {
+                "id", "deck_card_id", "scryfall_id", "status", "quantity",
+            }
+            if not _table_exists(conn, table_name):
+                raise RuntimeError(
+                    "Migration 10 requires deck_card_allocations to be created from model metadata"
+                )
+            actual_columns = {
+                row[1] for row in conn.exec_driver_sql(
+                    "PRAGMA table_info('deck_card_allocations')"
+                ).fetchall()
+            }
+            missing_columns = required_columns - actual_columns
+            if missing_columns:
+                raise RuntimeError(
+                    "Migration 10 deck_card_allocations is missing columns: "
+                    + ", ".join(sorted(missing_columns))
+                )
+
+            # Existing physical assignments retain their printing. Pending
+            # demand becomes Any printing because old data cannot prove which
+            # physical copy will eventually be pulled.
+            conn.execute(text("""
+                INSERT INTO deck_card_allocations (
+                    deck_card_id, scryfall_id, status, quantity
+                )
+                SELECT id, scryfall_id, 'grabbed', grabbed_quantity
+                FROM deck_cards d
+                WHERE grabbed_quantity > 0
+                  AND NOT EXISTS (
+                      SELECT 1 FROM deck_card_allocations a
+                      WHERE a.deck_card_id = d.id AND a.status = 'grabbed'
+                  )
+            """))
+            conn.execute(text("""
+                INSERT INTO deck_card_allocations (
+                    deck_card_id, scryfall_id, status, quantity
+                )
+                SELECT id, scryfall_id, 'proxy', proxy_quantity
+                FROM deck_cards d
+                WHERE proxy_quantity > 0
+                  AND NOT EXISTS (
+                      SELECT 1 FROM deck_card_allocations a
+                      WHERE a.deck_card_id = d.id AND a.status = 'proxy'
+                  )
+            """))
+            conn.execute(text("""
+                INSERT INTO deck_card_allocations (
+                    deck_card_id, scryfall_id, status, quantity
+                )
+                SELECT id, NULL, 'pending',
+                       quantity - grabbed_quantity - proxy_quantity
+                FROM deck_cards d
+                WHERE quantity - grabbed_quantity - proxy_quantity > 0
+                  AND NOT EXISTS (
+                      SELECT 1 FROM deck_card_allocations a
+                      WHERE a.deck_card_id = d.id AND a.status = 'pending'
+                  )
+            """))
+
+            invalid = conn.execute(text("""
+                SELECT COUNT(*)
+                FROM deck_cards d
+                LEFT JOIN (
+                    SELECT deck_card_id, SUM(quantity) AS allocated
+                    FROM deck_card_allocations
+                    GROUP BY deck_card_id
+                ) a ON a.deck_card_id = d.id
+                WHERE COALESCE(a.allocated, 0) != d.quantity
+            """)).scalar_one()
+            invalid_statuses = conn.execute(text("""
+                SELECT COUNT(*) FROM deck_card_allocations
+                WHERE quantity <= 0 OR status NOT IN ('pending', 'grabbed', 'proxy')
+            """)).scalar_one()
+            wrong_oracles = conn.execute(text("""
+                SELECT COUNT(*)
+                FROM deck_card_allocations a
+                JOIN deck_cards d ON d.id = a.deck_card_id
+                JOIN card_printings p ON p.scryfall_id = a.scryfall_id
+                WHERE a.scryfall_id IS NOT NULL AND p.oracle_id != d.oracle_id
+            """)).scalar_one()
+            if invalid or invalid_statuses or wrong_oracles:
+                raise RuntimeError(
+                    "Migration 10 allocation validation failed: "
+                    f"quantity_mismatches={invalid}, invalid_statuses={invalid_statuses}, "
+                    f"wrong_oracles={wrong_oracles}"
+                )
+            conn.execute(text("INSERT INTO schema_versions (version) VALUES (10)"))
+            conn.commit()
+
+        if 11 not in applied:
+            allocation_columns = {
+                row[1] for row in conn.exec_driver_sql(
+                    "PRAGMA table_info('deck_card_allocations')"
+                ).fetchall()
+            }
+            if "foil" not in allocation_columns:
+                conn.exec_driver_sql(
+                    "ALTER TABLE deck_card_allocations ADD COLUMN foil BOOLEAN"
+                )
+
+            # Legacy exact grabbed assignments can safely inherit a treatment
+            # only when the owned printing exists in exactly one treatment.
+            conn.execute(text("""
+                UPDATE deck_card_allocations AS a
+                SET foil = CASE
+                    WHEN EXISTS (
+                        SELECT 1 FROM inventory_lines i
+                        WHERE i.scryfall_id = a.scryfall_id AND i.foil = 1
+                    ) AND NOT EXISTS (
+                        SELECT 1 FROM inventory_lines i
+                        WHERE i.scryfall_id = a.scryfall_id AND i.foil = 0
+                    ) THEN 1
+                    WHEN EXISTS (
+                        SELECT 1 FROM inventory_lines i
+                        WHERE i.scryfall_id = a.scryfall_id AND i.foil = 0
+                    ) AND NOT EXISTS (
+                        SELECT 1 FROM inventory_lines i
+                        WHERE i.scryfall_id = a.scryfall_id AND i.foil = 1
+                    ) THEN 0
+                    ELSE NULL
+                END
+                WHERE a.status = 'grabbed'
+                  AND a.scryfall_id IS NOT NULL
+                  AND a.foil IS NULL
+            """))
+
+            # Early deck records could have a flagged commander without the
+            # denormalized deck pointer. Repair the unambiguous case.
+            conn.execute(text("""
+                UPDATE decks
+                SET commander_oracle_id = (
+                        SELECT dc.oracle_id FROM deck_cards dc
+                        WHERE dc.deck_id = decks.id AND dc.is_commander = 1
+                        LIMIT 1
+                    ),
+                    commander_scryfall_id = (
+                        SELECT dc.scryfall_id FROM deck_cards dc
+                        WHERE dc.deck_id = decks.id AND dc.is_commander = 1
+                        LIMIT 1
+                    )
+                WHERE (
+                    SELECT COUNT(*) FROM deck_cards dc
+                    WHERE dc.deck_id = decks.id AND dc.is_commander = 1
+                ) = 1
+            """))
+
+            invalid_treatments = conn.execute(text("""
+                SELECT COUNT(*) FROM deck_card_allocations
+                WHERE foil IS NOT NULL AND scryfall_id IS NULL
+            """)).scalar_one()
+            commander_mismatches = conn.execute(text("""
+                SELECT COUNT(*)
+                FROM decks d
+                JOIN deck_cards dc
+                  ON dc.deck_id = d.id AND dc.is_commander = 1
+                WHERE (
+                    SELECT COUNT(*) FROM deck_cards flagged
+                    WHERE flagged.deck_id = d.id AND flagged.is_commander = 1
+                ) = 1
+                  AND (d.commander_oracle_id != dc.oracle_id
+                       OR d.commander_scryfall_id != dc.scryfall_id
+                       OR d.commander_oracle_id IS NULL
+                       OR d.commander_scryfall_id IS NULL)
+            """)).scalar_one()
+            if invalid_treatments or commander_mismatches:
+                raise RuntimeError(
+                    "Migration 11 validation failed: "
+                    f"invalid_treatments={invalid_treatments}, "
+                    f"commander_mismatches={commander_mismatches}"
+                )
+            conn.execute(text("INSERT INTO schema_versions (version) VALUES (11)"))
+            conn.commit()

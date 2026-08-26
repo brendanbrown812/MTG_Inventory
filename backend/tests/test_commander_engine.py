@@ -241,6 +241,11 @@ def test_availability_aggregates_alternate_printings_and_reports_shortfall() -> 
         _hold(db, second, 2)
         report = analyze_commander_deck(db, deck)
 
+        missing_entry = next(dc for dc in deck.cards if dc.oracle_id == missing.oracle_id)
+        missing_entry.proxy_quantity = 1
+        db.flush()
+        proxy_report = analyze_commander_deck(db, deck)
+
     assert report["available"] is False
     assert report["availability"]["total_shortfall"] == 1
     assert report["availability"]["missing"] == [{
@@ -250,6 +255,9 @@ def test_availability_aggregates_alternate_printings_and_reports_shortfall() -> 
         "owned": 0,
         "shortfall": 1,
     }]
+    assert proxy_report["available"] is True
+    assert proxy_report["availability"]["total_shortfall"] == 0
+    assert proxy_report["availability"]["missing"] == []
 
 
 def test_curve_lands_and_mana_sources() -> None:

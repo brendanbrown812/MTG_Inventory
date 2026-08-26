@@ -11,6 +11,7 @@ import {
   patchDeck,
   removeDeckCard,
   resolveCard,
+  setDeckCommander,
   type CardMatch,
   type DeckCard,
   type DeckAnalysis,
@@ -18,6 +19,7 @@ import {
   type TextImportProgress,
 } from "../api";
 import { CardHoverPreview } from "../components/CardHoverPreview";
+import { DeckPrintingModal } from "../components/DeckPrintingModal";
 import { CONSTRUCTED_FORMATS, formatOptionLabel } from "../lib/formats";
 
 const SCRYFALL_UUID =
@@ -45,7 +47,7 @@ function AnalysisPanel({ analysis, loading }: { analysis: DeckAnalysis | null; l
         {loading ? <span className="text-xs text-stone-500">Refreshing…</span> : null}
       </div>
 
-      <div className="mt-4 grid gap-3 sm:grid-cols-3 lg:grid-cols-6">
+      <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-2">
         {[
           ["Legality", analysis.legal ? "Legal" : "Illegal", analysis.legal],
           ["Availability", analysis.available ? "Owned" : `${analysis.availability.total_shortfall} short`, analysis.available],
@@ -54,17 +56,17 @@ function AnalysisPanel({ analysis, loading }: { analysis: DeckAnalysis | null; l
           ["Mana sources", `${analysis.health.mana_sources.total}`, analysis.health.mana_sources.total >= analysis.health.mana_sources.target_min],
           ["Average MV", `${analysis.health.curve.average_mana_value}`, analysis.health.curve.average_mana_value <= 4],
         ].map(([label, value, good]) => (
-          <div key={String(label)} className="rounded-xl border border-white/5 bg-ink-950/45 px-3 py-2">
+          <div key={String(label)} className="rounded-xl border border-white/5 bg-ink-950/45 px-3 py-2.5">
             <div className="text-[10px] uppercase tracking-wider text-stone-600">{label}</div>
             <div className={`mt-1 text-sm font-semibold ${good ? "text-emerald-300" : "text-amber-300"}`}>{value}</div>
           </div>
         ))}
       </div>
 
-      <div className="mt-4 grid gap-4 lg:grid-cols-2">
+      <div className="mt-5 grid gap-5 md:grid-cols-2 xl:grid-cols-1">
         <div>
           <h3 className="text-xs font-medium uppercase tracking-wider text-stone-500">Functional roles</h3>
-          <div className="mt-2 grid grid-cols-2 gap-1.5 sm:grid-cols-3">
+          <div className="mt-2 grid grid-cols-2 gap-1.5 sm:grid-cols-3 xl:grid-cols-2">
             {Object.entries(analysis.health.roles).map(([role, data]) => (
               <div key={role} className="flex justify-between rounded-lg bg-ink-950/45 px-2.5 py-1.5 text-xs">
                 <span className="capitalize text-stone-400">{roleLabel(role)}</span>
@@ -81,7 +83,7 @@ function AnalysisPanel({ analysis, loading }: { analysis: DeckAnalysis | null; l
           {findings.length === 0 && analysis.availability.missing.length === 0 ? (
             <p className="mt-2 text-xs text-emerald-300">No legality, availability, or health issues detected.</p>
           ) : (
-            <ul className="mt-2 max-h-40 space-y-1 overflow-y-auto text-xs">
+            <ul className="mt-2 max-h-56 space-y-1 overflow-y-auto pr-1 text-xs">
               {analysis.availability.missing.map((row) => (
                 <li key={row.oracle_id} className="text-red-300">
                   Missing {row.shortfall}× {row.name} ({row.owned} owned, {row.required} required)
@@ -100,6 +102,10 @@ function AnalysisPanel({ analysis, loading }: { analysis: DeckAnalysis | null; l
   );
 }
 
+function displayedDeckCard(dc: DeckCard) {
+  return dc.allocations.find((allocation) => allocation.printing)?.printing ?? dc.card;
+}
+
 export default function DeckDetailPage() {
   const { id } = useParams();
   const deckId = Number(id);
@@ -111,11 +117,12 @@ export default function DeckDetailPage() {
   const [addQuery, setAddQuery] = useState("");
   const [addAsCommander, setAddAsCommander] = useState(false);
   const [commanderId, setCommanderId] = useState("");
+  const [commanderDirty, setCommanderDirty] = useState(false);
   const [busy, setBusy] = useState(false);
   const [pickList, setPickList] = useState<CardMatch[] | null>(null);
+  const [printingEditorCard, setPrintingEditorCard] = useState<DeckCard | null>(null);
 
   const [csvFile, setCsvFile] = useState<File | null>(null);
-  const [csvAddCollection, setCsvAddCollection] = useState(false);
   const [csvBusy, setCsvBusy] = useState(false);
 
   const [plainText, setPlainText] = useState("");
@@ -145,6 +152,7 @@ export default function DeckDetailPage() {
       const d = await fetchDeck(deckId);
       setDeck(d);
       setCommanderId(d.commander_scryfall_id ?? "");
+      setCommanderDirty(false);
       void refreshAnalysis(d.format);
     } catch (e) {
       setErr(e instanceof Error ? e.message : "Failed to load deck");
@@ -163,12 +171,17 @@ export default function DeckDetailPage() {
     setBusy(true);
     try {
       const d = await patchDeck(deck.id, {
+        name: deck.name.trim(),
         format: deck.format,
         status: deck.status,
         notes: deck.notes,
-        commander_scryfall_id: commanderId.trim() || null,
+        ...(commanderDirty
+          ? { commander_scryfall_id: commanderId.trim() || null }
+          : {}),
       });
       setDeck(d);
+      setCommanderId(d.commander_scryfall_id ?? "");
+      setCommanderDirty(false);
       void refreshAnalysis(d.format);
     } catch (e) {
       setErr(e instanceof Error ? e.message : "Save failed");
@@ -234,7 +247,7 @@ export default function DeckDetailPage() {
     setCsvBusy(true);
     setErr(null);
     try {
-      const { deck: updated, row_errors } = await importDeckCsvAppend(deck.id, csvFile, csvAddCollection);
+      const { deck: updated, row_errors } = await importDeckCsvAppend(deck.id, csvFile);
       setDeck(updated);
       void refreshAnalysis(updated.format);
       setCsvFile(null);
@@ -265,7 +278,7 @@ export default function DeckDetailPage() {
     }, 400);
 
     try {
-      const { deck: updated, row_errors } = await importDeckTextAppend(deck.id, plainText, csvAddCollection);
+      const { deck: updated, row_errors } = await importDeckTextAppend(deck.id, plainText);
       setDeck(updated);
       void refreshAnalysis(updated.format);
       setPlainText("");
@@ -288,9 +301,36 @@ export default function DeckDetailPage() {
     try {
       const d = await removeDeckCard(deck.id, dc.id);
       setDeck(d);
+      setCommanderId(d.commander_scryfall_id ?? "");
+      setCommanderDirty(false);
       void refreshAnalysis(d.format);
     } catch (e) {
       setErr(e instanceof Error ? e.message : "Remove failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function makeCommander(dc: DeckCard) {
+    if (!deck) return;
+    const current = deck.cards.find((card) => card.is_commander);
+    if (
+      current
+      && !confirm(
+        `Replace ${current.card?.name ?? "the current commander"} with ${dc.card?.name ?? "this card"}?`,
+      )
+    ) return;
+
+    setBusy(true);
+    setErr(null);
+    try {
+      const d = await setDeckCommander(deck.id, dc.id);
+      setDeck(d);
+      setCommanderId(d.commander_scryfall_id ?? "");
+      setCommanderDirty(false);
+      void refreshAnalysis(d.format);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "Commander selection failed");
     } finally {
       setBusy(false);
     }
@@ -331,25 +371,40 @@ export default function DeckDetailPage() {
           </Link>
           <h1 className="mt-2 font-display text-4xl font-semibold text-stone-100">{deck.name}</h1>
         </div>
-        <button
-          type="button"
-          onClick={() => void onDeleteDeck()}
-          disabled={busy}
-          className="self-start rounded-lg border border-red-500/30 px-3 py-1.5 text-xs text-red-300 hover:bg-red-950/40"
-        >
-          Delete deck
-        </button>
+        <div className="flex flex-wrap gap-2 self-start">
+          <Link
+            to={`/assembly?deck=${deck.id}`}
+            className="rounded-xl bg-emerald-500/20 px-4 py-2 text-sm font-medium text-emerald-100 ring-1 ring-emerald-400/30 transition hover:bg-emerald-500/30"
+          >
+            Assemble deck
+          </Link>
+          <button
+            type="button"
+            onClick={() => void onDeleteDeck()}
+            disabled={busy}
+            className="rounded-xl border border-red-500/30 px-4 py-2 text-sm text-red-300 hover:bg-red-950/40"
+          >
+            Delete deck
+          </button>
+        </div>
       </div>
 
       {err && (
         <div className="rounded-xl border border-red-500/30 bg-red-950/40 px-4 py-3 text-sm text-red-200">{err}</div>
       )}
 
-      <AnalysisPanel analysis={analysis} loading={analysisLoading} />
-
-      <div className="grid gap-6 lg:grid-cols-3">
-        <div className="space-y-4 rounded-2xl border border-white/10 bg-ink-900/40 p-6 lg:col-span-1">
+      <div className="grid items-start gap-6 xl:grid-cols-[minmax(300px,360px)_minmax(0,1fr)]">
+        <aside className="space-y-4 xl:sticky xl:top-24 xl:max-h-[calc(100vh-7rem)] xl:overflow-y-auto xl:pr-1">
+          <AnalysisPanel analysis={analysis} loading={analysisLoading} />
+          <div className="space-y-4 rounded-2xl border border-white/10 bg-ink-900/40 p-5">
           <h2 className="text-sm font-medium uppercase tracking-wider text-stone-500">Settings</h2>
+          <label className="block text-xs text-stone-500">Deck name</label>
+          <input
+            value={deck.name}
+            onChange={(e) => setDeck({ ...deck, name: e.target.value })}
+            maxLength={200}
+            className="mt-1 w-full rounded-xl border border-white/10 bg-ink-950/60 px-3 py-2 text-sm"
+          />
           <label className="block text-xs text-stone-500">Format</label>
           <select
             value={deck.format}
@@ -374,7 +429,10 @@ export default function DeckDetailPage() {
           <label className="mt-3 block text-xs text-stone-500">Commander Scryfall ID (UUID)</label>
           <input
             value={commanderId}
-            onChange={(e) => setCommanderId(e.target.value)}
+            onChange={(e) => {
+              setCommanderId(e.target.value);
+              setCommanderDirty(true);
+            }}
             placeholder="00000000-0000-0000-0000-000000000000"
             className="mt-1 w-full rounded-xl border border-white/10 bg-ink-950/60 px-3 py-2 font-mono text-xs"
           />
@@ -387,15 +445,16 @@ export default function DeckDetailPage() {
           />
           <button
             type="button"
-            disabled={busy}
+            disabled={busy || !deck.name.trim()}
             onClick={() => void saveMeta()}
             className="mt-4 w-full rounded-xl bg-stone-100 py-2.5 text-sm font-semibold text-ink-950"
           >
             Save settings
           </button>
-        </div>
+          </div>
+        </aside>
 
-        <div className="space-y-6 rounded-2xl border border-white/10 bg-ink-900/40 p-6 lg:col-span-2">
+        <div className="min-w-0 space-y-6 rounded-2xl border border-white/10 bg-ink-900/40 p-5 sm:p-6">
           <div>
             <h2 className="text-sm font-medium uppercase tracking-wider text-stone-500">Add card</h2>
             <p className="mt-1 text-xs text-stone-500">
@@ -477,15 +536,6 @@ export default function DeckDetailPage() {
                 />
                 {csvFile ? csvFile.name : "Choose CSV…"}
               </label>
-              <label className="flex items-center gap-2 text-xs text-stone-400">
-                <input
-                  type="checkbox"
-                  checked={csvAddCollection}
-                  onChange={(e) => setCsvAddCollection(e.target.checked)}
-                  className="rounded border-white/20 bg-ink-950"
-                />
-                Also add to collection
-              </label>
               <button
                 type="submit"
                 disabled={csvBusy || !csvFile}
@@ -517,15 +567,6 @@ export default function DeckDetailPage() {
                 spellCheck={false}
               />
               <div className="flex flex-wrap items-center gap-3">
-                <label className="flex items-center gap-2 text-xs text-stone-400">
-                  <input
-                    type="checkbox"
-                    checked={csvAddCollection}
-                    onChange={(e) => setCsvAddCollection(e.target.checked)}
-                    className="rounded border-white/20 bg-ink-950"
-                  />
-                  Also add to collection
-                </label>
                 <button
                   type="submit"
                   disabled={plainBusy || !plainText.trim()}
@@ -565,25 +606,44 @@ export default function DeckDetailPage() {
                       </td>
                     </tr>
                   ) : (
-                    cards.map((dc) => (
+                    cards.map((dc) => {
+                      const displayed = displayedDeckCard(dc);
+                      return (
                       <tr key={dc.id} className="border-t border-white/5">
                         <td className="px-3 py-2">
                           <div className="flex items-center gap-2">
-                            <CardHoverPreview
-                              src={dc.card?.image_uri_normal}
-                              name={dc.card?.name ?? dc.scryfall_id}
+                            <button
+                              type="button"
+                              onClick={() => setPrintingEditorCard(dc)}
+                              className="flex items-center gap-2 text-left hover:text-ember-200"
+                              aria-label={`Choose printing for ${dc.card?.name ?? dc.scryfall_id}`}
                             >
-                              {dc.card?.image_uri_normal ? (
-                                <img
-                                  src={dc.card.image_uri_normal}
-                                  alt=""
-                                  className="h-8 cursor-default rounded ring-1 ring-white/10"
-                                />
-                              ) : null}
-                            </CardHoverPreview>
-                            <span className="text-stone-200">{dc.card?.name ?? dc.scryfall_id}</span>
+                              <CardHoverPreview
+                                src={displayed?.image_uri_normal}
+                                name={displayed?.name ?? dc.scryfall_id}
+                              >
+                                {displayed?.image_uri_normal ? (
+                                  <img
+                                    src={displayed.image_uri_normal}
+                                    alt=""
+                                    className="h-8 rounded ring-1 ring-white/10"
+                                  />
+                                ) : null}
+                              </CardHoverPreview>
+                              <span className="text-stone-200 hover:text-ember-200">{dc.card?.name ?? dc.scryfall_id}</span>
+                            </button>
                             {dc.is_commander ? (
                               <span className="rounded bg-arcane-500/20 px-1.5 text-[10px] text-arcane-200">CMD</span>
+                            ) : null}
+                            {["commander", "edh"].includes(deck.format.toLowerCase()) && !dc.is_commander ? (
+                              <button
+                                type="button"
+                                onClick={() => void makeCommander(dc)}
+                                disabled={busy}
+                                className="rounded-lg border border-arcane-400/25 px-2 py-1 text-[11px] text-arcane-200 transition hover:bg-arcane-500/15 disabled:opacity-40"
+                              >
+                                Make commander
+                              </button>
                             ) : null}
                           </div>
                         </td>
@@ -599,7 +659,8 @@ export default function DeckDetailPage() {
                           </button>
                         </td>
                       </tr>
-                    ))
+                      );
+                    })
                   )}
                 </tbody>
               </table>
@@ -607,6 +668,18 @@ export default function DeckDetailPage() {
           </div>
         </div>
       </div>
+      {printingEditorCard && (
+        <DeckPrintingModal
+          deckId={deck.id}
+          deckCard={printingEditorCard}
+          onClose={() => setPrintingEditorCard(null)}
+          onSaved={(updated) => {
+            setDeck(updated);
+            setPrintingEditorCard(null);
+            void refreshAnalysis(updated.format);
+          }}
+        />
+      )}
     </div>
   );
 }

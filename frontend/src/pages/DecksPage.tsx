@@ -17,7 +17,6 @@ export default function DecksPage() {
   const [csvDeckName, setCsvDeckName] = useState("");
   const [csvFormat, setCsvFormat] = useState("commander");
   const [csvStatus, setCsvStatus] = useState("building");
-  const [csvAddCollection, setCsvAddCollection] = useState(false);
   const [csvBusy, setCsvBusy] = useState(false);
 
   const [plainText, setPlainText] = useState("");
@@ -65,7 +64,6 @@ export default function DecksPage() {
         csvDeckName.trim(),
         csvFormat,
         csvStatus,
-        csvAddCollection
       );
       if (row_errors.length > 0) {
         const er = row_errors[0];
@@ -97,7 +95,6 @@ export default function DecksPage() {
         csvDeckName.trim(),
         csvFormat,
         csvStatus,
-        csvAddCollection
       );
       if (row_errors.length > 0) {
         const er = row_errors[0];
@@ -228,15 +225,6 @@ export default function DecksPage() {
               />
               {csvFile ? csvFile.name : "Choose CSV…"}
             </label>
-            <label className="flex cursor-pointer items-center gap-2 text-sm text-stone-400">
-              <input
-                type="checkbox"
-                checked={csvAddCollection}
-                onChange={(e) => setCsvAddCollection(e.target.checked)}
-                className="rounded border-white/20 bg-ink-950"
-              />
-              Also add quantities to collection
-            </label>
             <button
               type="submit"
               disabled={csvBusy || !csvFile || !csvDeckName.trim()}
@@ -302,15 +290,6 @@ export default function DecksPage() {
             spellCheck={false}
           />
           <div className="flex flex-wrap items-center gap-4">
-            <label className="flex cursor-pointer items-center gap-2 text-sm text-stone-400">
-              <input
-                type="checkbox"
-                checked={csvAddCollection}
-                onChange={(e) => setCsvAddCollection(e.target.checked)}
-                className="rounded border-white/20 bg-ink-950"
-              />
-              Also add quantities to collection
-            </label>
             <button
               type="submit"
               disabled={plainBusy || !plainText.trim() || !csvDeckName.trim()}
@@ -339,7 +318,14 @@ export default function DecksPage() {
               className="group rounded-2xl border border-white/10 bg-ink-900/40 p-6 shadow-card transition hover:border-ember-400/30 hover:shadow-glow"
             >
               <div className="flex items-start justify-between gap-2">
-                <h2 className="font-display text-2xl text-stone-100 group-hover:text-ember-100">{d.name}</h2>
+                <div className="min-w-0">
+                  <h2 className="font-display text-2xl text-stone-100 group-hover:text-ember-100">{d.name}</h2>
+                  {["commander", "edh"].includes(d.format.toLowerCase()) && (
+                    <p className="mt-0.5 truncate text-sm text-stone-400">
+                      {d.commander_name ?? "Commander not selected"}
+                    </p>
+                  )}
+                </div>
                 <span className="rounded-full bg-white/5 px-2 py-0.5 text-[10px] uppercase tracking-wide text-stone-400">
                   {formatOptionLabel(d.format)}
                 </span>
