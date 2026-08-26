@@ -1,7 +1,9 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { createDeck, fetchDecks, importDeckCsvNew, importDeckTextNew, type Deck } from "../api";
 import { CONSTRUCTED_FORMATS, formatOptionLabel } from "../lib/formats";
+
+type DeckSort = "name" | "commander" | "completed";
 
 export default function DecksPage() {
   const navigate = useNavigate();
@@ -12,6 +14,7 @@ export default function DecksPage() {
   const [format, setFormat] = useState("commander");
   const [status, setStatus] = useState("building");
   const [creating, setCreating] = useState(false);
+  const [deckSort, setDeckSort] = useState<DeckSort>("name");
 
   const [csvFile, setCsvFile] = useState<File | null>(null);
   const [csvDeckName, setCsvDeckName] = useState("");
@@ -37,6 +40,41 @@ export default function DecksPage() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  const sortedDecks = useMemo(() => {
+    const byName = (left: Deck, right: Deck) => (
+      left.name.localeCompare(right.name, undefined, { sensitivity: "base" })
+    );
+    return [...decks].sort((left, right) => {
+      if (deckSort === "commander") {
+        const leftCommander = left.commander_name?.trim();
+        const rightCommander = right.commander_name?.trim();
+        if (!leftCommander && rightCommander) return 1;
+        if (leftCommander && !rightCommander) return -1;
+        if (leftCommander && rightCommander) {
+          const commanderOrder = leftCommander.localeCompare(
+            rightCommander,
+            undefined,
+            { sensitivity: "base" },
+          );
+          if (commanderOrder) return commanderOrder;
+        }
+        return byName(left, right);
+      }
+      if (deckSort === "completed") {
+        const statusRank = (deck: Deck) => (
+          ["complete", "completed"].includes(deck.status.toLowerCase())
+            ? 0
+            : deck.status.toLowerCase() === "building"
+              ? 1
+              : 2
+        );
+        const statusOrder = statusRank(left) - statusRank(right);
+        return statusOrder || byName(left, right);
+      }
+      return byName(left, right);
+    });
+  }, [decks, deckSort]);
 
   async function onCreate(e: React.FormEvent) {
     e.preventDefault();
@@ -125,6 +163,16 @@ export default function DecksPage() {
         </p>
       </div>
 
+      <details className="group rounded-2xl border border-white/10 bg-ink-900/30 shadow-card">
+        <summary className="flex cursor-pointer list-none items-center justify-between gap-4 px-6 py-5 text-stone-200 marker:hidden">
+          <div>
+            <h2 className="font-display text-xl">Create or import a deck</h2>
+            <p className="mt-1 text-sm text-stone-500">Start empty, upload a CSV, or paste a plaintext list.</p>
+          </div>
+          <span className="text-lg text-stone-500 transition-transform group-open:rotate-180" aria-hidden="true">⌄</span>
+        </summary>
+
+        <div className="space-y-6 border-t border-white/10 p-4 sm:p-6">
       <form
         onSubmit={(e) => void onCreate(e)}
         className="flex flex-col gap-4 rounded-2xl border border-white/10 bg-ink-900/40 p-6 shadow-card sm:flex-row sm:items-end"
@@ -300,10 +348,31 @@ export default function DecksPage() {
           </div>
         </form>
       </div>
+        </div>
+      </details>
 
       {err && (
         <div className="rounded-xl border border-red-500/30 bg-red-950/40 px-4 py-3 text-sm text-red-200">{err}</div>
       )}
+
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+        <div>
+          <h2 className="font-display text-2xl text-stone-100">Your decks</h2>
+          <p className="mt-1 text-sm text-stone-500">{decks.length} {decks.length === 1 ? "deck" : "decks"}</p>
+        </div>
+        <label className="text-xs font-medium uppercase tracking-wider text-stone-500">
+          Sort decks
+          <select
+            value={deckSort}
+            onChange={(event) => setDeckSort(event.target.value as DeckSort)}
+            className="mt-1 block w-full rounded-xl border border-white/10 bg-ink-950/60 px-4 py-2.5 text-sm normal-case tracking-normal text-stone-200 outline-none sm:w-64"
+          >
+            <option value="name">Deck name · A–Z</option>
+            <option value="commander">Commander name · A–Z</option>
+            <option value="completed">Completed first</option>
+          </select>
+        </label>
+      </div>
 
       <div className="grid gap-4 sm:grid-cols-2">
         {loading ? (
@@ -311,7 +380,7 @@ export default function DecksPage() {
         ) : decks.length === 0 ? (
           <p className="text-stone-500">No decks yet — create one above.</p>
         ) : (
-          decks.map((d) => (
+          sortedDecks.map((d) => (
             <Link
               key={d.id}
               to={`/decks/${d.id}`}
