@@ -11,7 +11,6 @@ import {
   patchDeck,
   removeDeckCard,
   resolveCard,
-  setDeckCommander,
   type CardMatch,
   type DeckCard,
   type DeckAnalysis,
@@ -306,31 +305,6 @@ export default function DeckDetailPage() {
       void refreshAnalysis(d.format);
     } catch (e) {
       setErr(e instanceof Error ? e.message : "Remove failed");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function makeCommander(dc: DeckCard) {
-    if (!deck) return;
-    const current = deck.cards.find((card) => card.is_commander);
-    if (
-      current
-      && !confirm(
-        `Replace ${current.card?.name ?? "the current commander"} with ${dc.card?.name ?? "this card"}?`,
-      )
-    ) return;
-
-    setBusy(true);
-    setErr(null);
-    try {
-      const d = await setDeckCommander(deck.id, dc.id);
-      setDeck(d);
-      setCommanderId(d.commander_scryfall_id ?? "");
-      setCommanderDirty(false);
-      void refreshAnalysis(d.format);
-    } catch (e) {
-      setErr(e instanceof Error ? e.message : "Commander selection failed");
     } finally {
       setBusy(false);
     }
@@ -635,16 +609,6 @@ export default function DeckDetailPage() {
                             {dc.is_commander ? (
                               <span className="rounded bg-arcane-500/20 px-1.5 text-[10px] text-arcane-200">CMD</span>
                             ) : null}
-                            {["commander", "edh"].includes(deck.format.toLowerCase()) && !dc.is_commander ? (
-                              <button
-                                type="button"
-                                onClick={() => void makeCommander(dc)}
-                                disabled={busy}
-                                className="rounded-lg border border-arcane-400/25 px-2 py-1 text-[11px] text-arcane-200 transition hover:bg-arcane-500/15 disabled:opacity-40"
-                              >
-                                Make commander
-                              </button>
-                            ) : null}
                           </div>
                         </td>
                         <td className="px-3 py-2 font-mono text-stone-400">{dc.quantity}</td>
@@ -672,9 +636,13 @@ export default function DeckDetailPage() {
         <DeckPrintingModal
           deckId={deck.id}
           deckCard={printingEditorCard}
+          allowCommanderSelection={["commander", "edh"].includes(deck.format.toLowerCase())}
+          currentCommanderName={deck.cards.find((card) => card.is_commander)?.card?.name ?? null}
           onClose={() => setPrintingEditorCard(null)}
           onSaved={(updated) => {
             setDeck(updated);
+            setCommanderId(updated.commander_scryfall_id ?? "");
+            setCommanderDirty(false);
             setPrintingEditorCard(null);
             void refreshAnalysis(updated.format);
           }}

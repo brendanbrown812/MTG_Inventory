@@ -851,6 +851,8 @@ export default function DeckAssemblyPage() {
             deckId={activeDeck.id}
             deckCard={deckCard}
             initialUnitIndex={printingEditor.unitIndex}
+            allowCommanderSelection={["commander", "edh"].includes(activeDeck.format.toLowerCase())}
+            currentCommanderName={activeDeck.cards.find((card) => card.is_commander)?.card?.name ?? null}
             onClose={() => setPrintingEditor(null)}
             onSaved={(updated) => {
               setActiveDeck(updated);

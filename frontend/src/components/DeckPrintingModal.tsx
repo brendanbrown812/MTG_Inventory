@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import {
   fetchGroupedInventory,
   replaceDeckCardAllocations,
+  setDeckCommander,
   type DeckCard,
   type DeckDetail,
   type InventoryPrinting,
@@ -81,12 +82,16 @@ export function DeckPrintingModal({
   initialUnitIndex = 0,
   onClose,
   onSaved,
+  allowCommanderSelection = false,
+  currentCommanderName = null,
 }: {
   deckId: number;
   deckCard: DeckCard;
   initialUnitIndex?: number;
   onClose: () => void;
   onSaved: (deck: DeckDetail) => void;
+  allowCommanderSelection?: boolean;
+  currentCommanderName?: string | null;
 }) {
   const units = useMemo(() => deckAllocationUnits(deckCard), [deckCard]);
   const [unitIndex, setUnitIndex] = useState(Math.min(initialUnitIndex, Math.max(0, units.length - 1)));
@@ -99,6 +104,7 @@ export function DeckPrintingModal({
   );
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [commanderSaving, setCommanderSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -181,6 +187,22 @@ export function DeckPrintingModal({
     }
   }
 
+  async function makeCommander() {
+    if (
+      currentCommanderName
+      && !confirm(`Replace ${currentCommanderName} with ${cardName}?`)
+    ) return;
+    setCommanderSaving(true);
+    setError(null);
+    try {
+      onSaved(await setDeckCommander(deckId, deckCard.id));
+    } catch (reason) {
+      setError(readableError(reason));
+    } finally {
+      setCommanderSaving(false);
+    }
+  }
+
   const selectedPrinting = printings.find((row) => row.scryfall_id === selectedScryfallId);
   const selectedUnit = units[unitIndex];
   const cardName = deckCard.card?.name ?? deckCard.scryfall_id;
@@ -211,6 +233,20 @@ export function DeckPrintingModal({
             <div>
               <h2 className="font-display text-2xl text-stone-100">{cardName}</h2>
               <p className="mt-1 text-xs text-stone-500">{deckCard.card?.type_line}</p>
+              {deckCard.is_commander ? (
+                <span className="mt-3 inline-flex rounded-lg bg-arcane-500/20 px-2.5 py-1 text-xs font-medium text-arcane-200 ring-1 ring-arcane-400/25">
+                  Commander
+                </span>
+              ) : allowCommanderSelection ? (
+                <button
+                  type="button"
+                  disabled={commanderSaving}
+                  onClick={() => void makeCommander()}
+                  className="mt-3 rounded-lg border border-arcane-400/25 px-3 py-1.5 text-xs font-medium text-arcane-200 transition hover:bg-arcane-500/15 disabled:opacity-40"
+                >
+                  {commanderSaving ? "Selecting…" : "Make commander"}
+                </button>
+              ) : null}
             </div>
             <button type="button" onClick={onClose} className="rounded-lg px-2 py-1 text-stone-500 hover:bg-white/5 hover:text-stone-200" aria-label="Close">✕</button>
           </div>
