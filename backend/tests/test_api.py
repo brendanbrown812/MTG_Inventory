@@ -6,7 +6,7 @@ from fastapi.testclient import TestClient
 
 from app.config import settings
 from app.database import SessionLocal
-from app.models import CardPrinting, InventoryLine, OracleCard
+from app.models import CardPrinting, DeckInventoryAddition, InventoryLine, OracleCard
 
 
 SCRYFALL_ID = "00000000-0000-4000-8000-000000000001"
@@ -608,12 +608,6 @@ def test_deck_assembly_tracks_physical_copies_proxies_and_demand(
 ) -> None:
     _add_cached_card()
     with SessionLocal() as db:
-        db.add(InventoryLine(
-            scryfall_id=SCRYFALL_ID,
-            quantity=1,
-            foil=False,
-            language="en",
-        ))
         db.commit()
 
     created = client.post("/api/decks", json={
@@ -817,6 +811,206 @@ def test_deck_import_creates_demand_without_adding_inventory(client: TestClient)
     assert response.status_code == 200, response.text
     assert response.json()["deck"]["cards"][0]["grabbed_quantity"] == 0
     assert client.get("/api/inventory").json() == []
+
+
+def test_deck_draft_save_atomically_replaces_metadata_copies_and_prints(
+    client: TestClient,
+) -> None:
+    _add_cached_card()
+    with SessionLocal() as db:
+        oracle = db.get(OracleCard, "00000000-0000-4000-8000-000000000002")
+        db.add(CardPrinting(
+            scryfall_id=SECOND_PRINTING_ID,
+            oracle=oracle,
+            rarity="uncommon",
+            set_code="two",
+            collector_number="2",
+        ))
+        db.commit()
+
+    created = client.post("/api/decks", json={
+        "name": "Draft before save",
+        "format": "commander",
+        "cards": [{"scryfall_id": SCRYFALL_ID}],
+    }).json()
+
+    draft = {
+        "name": "Draft after save",
+        "format": "commander",
+        "status": "complete",
+        "notes": "Saved in one transaction",
+        "cards": [
+            {
+                "card_scryfall_id": SCRYFALL_ID,
+                "printing_scryfall_id": SCRYFALL_ID,
+                "status": "grabbed",
+                "foil": False,
+                "add_to_collection": True,
+                "collection_addition_id": "00000000-0000-4000-8000-000000000010",
+            },
+            {
+                "card_scryfall_id": SCRYFALL_ID,
+                "printing_scryfall_id": SECOND_PRINTING_ID,
+                "status": "proxy",
+            },
+        ],
+    }
+    saved = client.put(f"/api/decks/{created['id']}/draft", json=draft)
+    assert saved.status_code == 200, saved.text
+    body = saved.json()
+    assert body["name"] == "Draft after save"
+    assert body["status"] == "complete"
+    assert body["notes"] == "Saved in one transaction"
+    assert len(body["cards"]) == 1
+    assert body["cards"][0]["quantity"] == 2
+    assert body["cards"][0]["grabbed_quantity"] == 1
+    assert body["cards"][0]["proxy_quantity"] == 1
+    assert {
+        (row["status"], row["scryfall_id"], row["foil"])
+        for row in body["cards"][0]["allocations"]
+    } == {
+        ("grabbed", SCRYFALL_ID, False),
+        ("proxy", SECOND_PRINTING_ID, None),
+    }
+    assert sum(row["quantity"] for row in client.get("/api/inventory").json()) == 1
+
+    replayed = client.put(f"/api/decks/{created['id']}/draft", json=draft)
+    assert replayed.status_code == 200, replayed.text
+    assert sum(row["quantity"] for row in client.get("/api/inventory").json()) == 1
+    with SessionLocal() as db:
+        assert db.query(DeckInventoryAddition).count() == 1
+
+
+def test_invalid_deck_draft_rolls_back_all_card_and_metadata_changes(
+    client: TestClient,
+) -> None:
+    _add_cached_card()
+    created = client.post("/api/decks", json={
+        "name": "Keep this deck",
+        "format": "commander",
+        "cards": [{"scryfall_id": SCRYFALL_ID}],
+    }).json()
+
+    invalid = client.put(f"/api/decks/{created['id']}/draft", json={
+        "name": "Must roll back",
+        "format": "commander",
+        "status": "complete",
+        "cards": [{
+            "card_scryfall_id": SCRYFALL_ID,
+            "printing_scryfall_id": SCRYFALL_ID,
+            "status": "grabbed",
+            "foil": False,
+            "is_commander": True,
+            "add_to_collection": True,
+            "collection_addition_id": "00000000-0000-4000-8000-000000000011",
+        }],
+    })
+    assert invalid.status_code == 422
+    assert "cannot be the commander" in invalid.json()["detail"]
+
+    unchanged = client.get(f"/api/decks/{created['id']}").json()
+    assert unchanged["name"] == "Keep this deck"
+    assert unchanged["status"] == "building"
+    assert unchanged["commander_scryfall_id"] is None
+    assert unchanged["cards"][0]["quantity"] == 1
+    assert unchanged["cards"][0]["grabbed_quantity"] == 0
+    assert unchanged["cards"][0]["is_commander"] is False
+    assert client.get("/api/inventory").json() == []
+    with SessionLocal() as db:
+        assert db.query(DeckInventoryAddition).count() == 0
+
+
+def test_deck_draft_save_preserves_sideboard_cards(client: TestClient) -> None:
+    _add_cached_card()
+    created = client.post("/api/decks", json={
+        "name": "Sideboard draft",
+        "format": "standard",
+        "cards": [{"scryfall_id": SCRYFALL_ID, "is_sideboard": True}],
+    }).json()
+
+    saved = client.put(f"/api/decks/{created['id']}/draft", json={
+        "name": "Sideboard draft",
+        "format": "standard",
+        "status": "building",
+        "cards": [{
+            "card_scryfall_id": SCRYFALL_ID,
+            "printing_scryfall_id": SCRYFALL_ID,
+            "status": "pending",
+            "is_sideboard": True,
+        }],
+    })
+
+    assert saved.status_code == 200, saved.text
+    assert len(saved.json()["cards"]) == 1
+    assert saved.json()["cards"][0]["is_sideboard"] is True
+
+
+def test_add_inventory_card_merges_matching_lines_and_separates_foil(
+    client: TestClient,
+) -> None:
+    _add_cached_card()
+
+    first = client.post("/api/inventory", json={
+        "scryfall_id": SCRYFALL_ID,
+        "quantity": 2,
+        "foil": False,
+    })
+    assert first.status_code == 200, first.text
+    assert first.json()["quantity"] == 2
+
+    merged = client.post("/api/inventory", json={
+        "scryfall_id": SCRYFALL_ID,
+        "quantity": 3,
+        "foil": False,
+    })
+    assert merged.status_code == 200, merged.text
+    assert merged.json()["id"] == first.json()["id"]
+    assert merged.json()["quantity"] == 5
+
+    foil = client.post("/api/inventory", json={
+        "scryfall_id": SCRYFALL_ID,
+        "quantity": 1,
+        "foil": True,
+    })
+    assert foil.status_code == 200, foil.text
+    assert foil.json()["id"] != first.json()["id"]
+
+    grouped = client.get("/api/inventory/grouped").json()[0]
+    assert grouped["total_quantity"] == 6
+    assert grouped["printings"][0]["nonfoil_quantity"] == 5
+    assert grouped["printings"][0]["foil_quantity"] == 1
+
+
+def test_deck_csv_preview_and_card_resolution_do_not_mutate_a_deck(
+    client: TestClient,
+) -> None:
+    _add_cached_card()
+    created = client.post("/api/decks", json={
+        "name": "Unchanged deck",
+        "cards": [{"scryfall_id": SCRYFALL_ID}],
+    }).json()
+
+    preview = client.post(
+        "/api/decks/preview-csv",
+        files={"file": (
+            "deck.csv",
+            f"Scryfall ID,Quantity,Foil\n{SCRYFALL_ID},2,false\n",
+            "text/csv",
+        )},
+    )
+    assert preview.status_code == 200, preview.text
+    assert preview.json()["cards"][0]["quantity"] == 2
+
+    resolved = client.get("/api/cards/resolve", params={"q": SCRYFALL_ID})
+    assert resolved.status_code == 200, resolved.text
+    match = resolved.json()["matches"][0]
+    assert match["scryfall_id"] == SCRYFALL_ID
+    assert match["name"] == "Test Ring"
+    assert match["type_line"] == "Artifact"
+
+    unchanged = client.get(f"/api/decks/{created['id']}").json()
+    assert unchanged["name"] == "Unchanged deck"
+    assert unchanged["cards"][0]["quantity"] == 1
 
 
 def test_proxy_to_grabbed_does_not_consume_another_decks_earmarked_copy(

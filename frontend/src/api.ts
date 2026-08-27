@@ -226,7 +226,49 @@ export async function fetchGroupedInventory(q: string): Promise<InventoryOracleG
 
 export async function deleteInventoryLine(id: number): Promise<void> {
   const r = await fetch(`${base}/api/inventory/${id}`, { method: "DELETE" });
-  if (!r.ok) throw new Error(await r.text());
+  if (!r.ok) {
+    const payload = await r.json().catch(() => null) as { detail?: string } | null;
+    throw new Error(payload?.detail ?? "Could not remove inventory line");
+  }
+}
+
+export async function updateInventoryLineQuantity(
+  id: number,
+  quantity: number,
+): Promise<InventoryLine> {
+  const r = await fetch(`${base}/api/inventory/${id}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ quantity }),
+  });
+  if (!r.ok) {
+    const payload = await r.json().catch(() => null) as { detail?: string } | null;
+    throw new Error(payload?.detail ?? "Could not update inventory quantity");
+  }
+  return r.json();
+}
+
+export async function addInventoryCard(
+  scryfallId: string,
+  quantity = 1,
+  foil = false,
+  language = "en",
+): Promise<InventoryLine> {
+  const r = await fetch(`${base}/api/inventory`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      scryfall_id: scryfallId,
+      quantity,
+      foil,
+      language,
+    }),
+  });
+  if (!r.ok) {
+    const payload = await r.json().catch(() => null) as { detail?: string } | null;
+    throw new Error(payload?.detail ?? "Could not add the card to your collection");
+  }
+  return r.json();
 }
 
 export async function clearInventory(): Promise<{ deleted: number }> {
@@ -264,11 +306,15 @@ export async function fetchPrintingOptions(scryfallId: string): Promise<Printing
 export async function changeInventoryLinePrinting(
   lineId: number,
   targetScryfallId: string,
+  quantity?: number,
 ): Promise<InventoryPrintingChangeResult> {
   const r = await fetch(`${base}/api/inventory/lines/${lineId}/printing`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ target_scryfall_id: targetScryfallId }),
+    body: JSON.stringify({
+      target_scryfall_id: targetScryfallId,
+      ...(quantity === undefined ? {} : { quantity }),
+    }),
   });
   if (!r.ok) throw new Error(await r.text());
   return r.json();
@@ -529,12 +575,7 @@ export async function fetchCardMatches(scryfallId: string, minScore = 35): Promi
   return j.matches as DeckMatch[];
 }
 
-export type CardMatch = {
-  scryfall_id: string;
-  name: string;
-  type_line: string | null;
-  image_uri_normal: string | null;
-};
+export type CardMatch = Card;
 
 export async function resolveCard(query: string): Promise<{ matches: CardMatch[] }> {
   const r = await fetch(`${base}/api/cards/resolve?q=${encodeURIComponent(query)}`);
@@ -568,6 +609,47 @@ export async function importDeckCsvAppend(
   fd.append("file", file);
   const r = await fetch(`${base}/api/decks/${deckId}/import-csv`, { method: "POST", body: fd });
   if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+
+export async function previewDeckCsv(file: File): Promise<DeckTextPreview> {
+  const fd = new FormData();
+  fd.append("file", file);
+  const r = await fetch(`${base}/api/decks/preview-csv`, { method: "POST", body: fd });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+
+export type DeckDraftCopy = {
+  card_scryfall_id: string;
+  printing_scryfall_id: string | null;
+  status: "pending" | "grabbed" | "proxy";
+  foil: boolean | null;
+  is_commander: boolean;
+  is_sideboard: boolean;
+  add_to_collection: boolean;
+  collection_addition_id: string | null;
+};
+
+export async function saveDeckDraft(
+  deckId: number,
+  body: {
+    name: string;
+    format: string;
+    status: string;
+    notes: string | null;
+    cards: DeckDraftCopy[];
+  },
+): Promise<DeckDetail> {
+  const r = await fetch(`${base}/api/decks/${deckId}/draft`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) {
+    const payload = await r.json().catch(() => null) as { detail?: string } | null;
+    throw new Error(payload?.detail ?? "Could not save deck changes");
+  }
   return r.json();
 }
 

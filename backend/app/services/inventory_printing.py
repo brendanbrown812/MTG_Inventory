@@ -102,6 +102,7 @@ def _remap_exact_allocations(
             DeckCardAllocation.deck_card_id == row.deck_card_id,
             DeckCardAllocation.status == row.status,
             DeckCardAllocation.scryfall_id == target_scryfall_id,
+            DeckCardAllocation.foil == row.foil,
         ).first()
         if destination:
             destination.quantity += row.quantity
@@ -152,6 +153,7 @@ def correct_inventory_line_printing(
     target_foil: bool,
     target_nonfoil: bool,
     target_language: str | None,
+    quantity: int | None = None,
 ) -> PrintingCorrectionResult:
     source_id = line.scryfall_id
     if source_id == target.scryfall_id:
@@ -165,6 +167,11 @@ def correct_inventory_line_printing(
         target_nonfoil=target_nonfoil,
         target_language=target_language,
     )
+    moved_quantity = line.quantity if quantity is None else quantity
+    if moved_quantity > line.quantity:
+        raise InventoryPrintingError(
+            f"Cannot move {moved_quantity} copies; this inventory line has {line.quantity}"
+        )
     source_total = sum(
         row.quantity for row in db.query(InventoryLine).filter(
             InventoryLine.scryfall_id == source_id
@@ -182,18 +189,70 @@ def correct_inventory_line_printing(
     exact_allocations = db.query(DeckCardAllocation.id).filter(
         DeckCardAllocation.scryfall_id == source_id
     ).first()
-    remaining_source = source_total - line.quantity
+    remaining_source = source_total - moved_quantity
     if remaining_source > 0 and remaining_source < exact_grabbed:
         raise InventoryPrintingError(
             "Changing this line would leave fewer copies than its exact grabbed deck "
             "assignments. Change the whole printing, or change those deck assignments first.",
             status_code=409,
         )
-    quantity = line.quantity
-    _move_line(db, line, target)
+    treatment_total = sum(
+        row.quantity for row in db.query(InventoryLine).filter(
+            InventoryLine.scryfall_id == source_id,
+            InventoryLine.foil.is_(line.foil),
+        ).all()
+    )
+    treatment_grabbed = int(
+        db.query(func.coalesce(func.sum(DeckCardAllocation.quantity), 0))
+        .filter(
+            DeckCardAllocation.scryfall_id == source_id,
+            DeckCardAllocation.status == "grabbed",
+            DeckCardAllocation.foil.is_(line.foil),
+        )
+        .scalar()
+        or 0
+    )
+    if (
+        remaining_source > 0
+        and treatment_total - moved_quantity < treatment_grabbed
+    ):
+        treatment = "foil" if line.foil else "nonfoil"
+        raise InventoryPrintingError(
+            f"Changing these copies would leave fewer {treatment} copies than the "
+            "deck assignments using this exact printing. Change those deck assignments first.",
+            status_code=409,
+        )
+
+    if moved_quantity == line.quantity:
+        _move_line(db, line, target)
+    else:
+        destination = _destination_line(db, line, target.scryfall_id)
+        if destination:
+            _validate_merge_metadata(destination, line)
+            destination.quantity += moved_quantity
+            _merge_annotation(destination, line)
+        else:
+            db.add(InventoryLine(
+                scryfall_id=target.scryfall_id,
+                quantity=moved_quantity,
+                foil=line.foil,
+                misprint=line.misprint,
+                altered=line.altered,
+                condition=line.condition,
+                language=line.language,
+                set_code=target.set_code,
+                collector_number=target.collector_number,
+                purchase_price=line.purchase_price,
+                purchase_currency=line.purchase_currency,
+                manabox_id=line.manabox_id,
+            ))
+        line.quantity -= moved_quantity
+        db.flush()
     if exact_allocations and remaining_source == 0:
         _remap_exact_allocations(db, source_id, target.scryfall_id)
-    return PrintingCorrectionResult(1, quantity, source_id, target.scryfall_id)
+    return PrintingCorrectionResult(
+        1, moved_quantity, source_id, target.scryfall_id
+    )
 
 
 def correct_inventory_printing(

@@ -33,6 +33,17 @@ class InventoryLineOut(BaseModel):
     card: CardOut | None
 
 
+class InventoryLineQuantityUpdate(BaseModel):
+    quantity: int = Field(ge=1, le=999_999)
+
+
+class InventoryCardAdd(BaseModel):
+    scryfall_id: str = Field(min_length=36, max_length=36)
+    quantity: int = Field(default=1, ge=1, le=999_999)
+    foil: bool = False
+    language: str = Field(default="en", min_length=2, max_length=10)
+
+
 class InventoryPrintingOut(BaseModel):
     scryfall_id: str
     set_code: str | None
@@ -84,6 +95,25 @@ class DeckCardAllocationIn(BaseModel):
 
 class DeckCardAllocationReplace(BaseModel):
     allocations: list[DeckCardAllocationIn] = Field(min_length=1, max_length=1_000)
+
+
+class DeckDraftCopyIn(BaseModel):
+    card_scryfall_id: str = Field(min_length=36, max_length=36)
+    printing_scryfall_id: str | None = Field(default=None, min_length=36, max_length=36)
+    status: Literal["pending", "grabbed", "proxy"] = "pending"
+    foil: bool | None = None
+    is_commander: bool = False
+    is_sideboard: bool = False
+    add_to_collection: bool = False
+    collection_addition_id: str | None = Field(default=None, min_length=36, max_length=36)
+
+
+class DeckDraftSave(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    format: str = Field(min_length=1, max_length=40)
+    status: str = Field(min_length=1, max_length=20)
+    notes: str | None = Field(default=None, max_length=50_000)
+    cards: list[DeckDraftCopyIn] = Field(default_factory=list, max_length=1_000)
 
 
 class DeckCreate(BaseModel):
@@ -180,6 +210,7 @@ class PrintingOptionOut(BaseModel):
 
 class InventoryPrintingChange(BaseModel):
     target_scryfall_id: str = Field(min_length=36, max_length=36)
+    quantity: int | None = Field(default=None, ge=1, le=999_999)
 
 
 class InventoryPrintingChangeOut(BaseModel):
@@ -189,11 +220,8 @@ class InventoryPrintingChangeOut(BaseModel):
     target_scryfall_id: str
 
 
-class CardResolveMatch(BaseModel):
-    scryfall_id: str
-    name: str
-    type_line: str | None = None
-    image_uri_normal: str | None = None
+class CardResolveMatch(CardOut):
+    pass
 
 
 class CardResolveOut(BaseModel):

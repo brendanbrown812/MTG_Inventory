@@ -83,7 +83,7 @@ export default function DecksPage() {
     try {
       const d = await createDeck({ name: name.trim(), format, status });
       setName("");
-      setDecks((prev) => [...prev, d].sort((a, b) => a.name.localeCompare(b.name)));
+      navigate(`/decks/${d.id}`);
     } catch (e) {
       setErr(e instanceof Error ? e.message : "Create failed");
     } finally {

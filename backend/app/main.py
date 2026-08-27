@@ -22,8 +22,8 @@ from app.config import settings
 from app.database import Base, SessionLocal, engine, get_db, run_migrations
 from app.logging_setup import configure_logging, get_logger
 from app.models import (
-    CardPrinting, Deck, DeckCard, DeckCardAllocation, EnrichmentStats, InventoryLine,
-    MechanicProfileRecord, OracleCard, RecommendationRun,
+    CardPrinting, Deck, DeckCard, DeckCardAllocation, DeckInventoryAddition,
+    EnrichmentStats, InventoryLine, MechanicProfileRecord, OracleCard, RecommendationRun,
 )
 from app.embeddings.registry import build_embedding_provider, embedding_provider_is_configured
 from app.evaluation.runner import run_local_quality_evaluation
@@ -51,11 +51,14 @@ from app.schemas import (
     DeckCsvImportOut,
     DeckCsvRowError,
     DeckDetailOut,
+    DeckDraftSave,
     DeckOut,
     DeckUpdate,
     ImportResult,
     ImportRowResult,
+    InventoryCardAdd,
     InventoryLineOut,
+    InventoryLineQuantityUpdate,
     InventoryOracleGroupOut,
     InventoryPrintingChange,
     InventoryPrintingChangeOut,
@@ -358,6 +361,54 @@ def _apply_deck_csv_rows(
             existing_dc[dc_key] = dc
 
     return errors
+
+
+def _preview_deck_csv_rows(db: Session, reader: csv.DictReader) -> dict:
+    rows = list(reader)
+    identifiers = [
+        _norm_str({k.strip().lower(): v for k, v in row.items() if k}.get("scryfall id"))
+        for row in rows
+    ]
+    cache_map = bulk_ensure_cards_cached(db, [value for value in identifiers if value])
+    errors: list[DeckCsvRowError] = []
+    cards = []
+    for index, row in enumerate(rows):
+        values = {k.strip().lower(): v for k, v in row.items() if k}
+        scryfall_id = _norm_str(values.get("scryfall id"))
+        if not scryfall_id:
+            errors.append(DeckCsvRowError(row_index=index, error="Missing Scryfall ID"))
+            continue
+        try:
+            quantity = int(float(values.get("quantity") or 0))
+        except ValueError:
+            quantity = 0
+        if quantity <= 0:
+            errors.append(DeckCsvRowError(row_index=index, error="Invalid quantity"))
+            continue
+        printing = cache_map.get(scryfall_id)
+        if printing is None:
+            errors.append(DeckCsvRowError(row_index=index, error="Unknown Scryfall ID"))
+            continue
+        cards.append({
+            "line_index": index,
+            "quantity": quantity,
+            "scryfall_id": printing.scryfall_id,
+            "oracle_id": printing.oracle_id,
+            "name": printing.name,
+            "type_line": printing.type_line,
+            "colors": printing.colors,
+            "image_uri_normal": printing.image_uri_normal,
+            "set_code": printing.set_code,
+            "collector_number": printing.collector_number,
+            "foil": _norm_bool(values.get("foil")),
+            "is_commander": False,
+            "owned_quantity": _owned_quantity_for_oracle(db, printing.oracle_id),
+        })
+    return {
+        "cards": cards,
+        "row_errors": [error.model_dump() for error in errors],
+        "total_quantity": sum(card["quantity"] for card in cards),
+    }
 
 
 _QTY_NAME_LINE = re.compile(r"^(\d+)\s+(.+)$")
@@ -719,6 +770,61 @@ def list_inventory(
     return query.all()
 
 
+def _merge_inventory_line(
+    db: Session,
+    *,
+    scryfall_id: str,
+    quantity: int,
+    foil: bool,
+    language: str = "en",
+) -> InventoryLine:
+    line = (
+        db.query(InventoryLine)
+        .filter(
+            InventoryLine.scryfall_id == scryfall_id,
+            InventoryLine.foil.is_(foil),
+            InventoryLine.condition.is_(None),
+            InventoryLine.language == language,
+        )
+        .first()
+    )
+    if line is None:
+        line = InventoryLine(
+            scryfall_id=scryfall_id,
+            quantity=quantity,
+            foil=foil,
+            condition=None,
+            language=language,
+        )
+        db.add(line)
+    else:
+        line.quantity += quantity
+    db.flush()
+    return line
+
+
+@app.post("/api/inventory", response_model=InventoryLineOut)
+def add_inventory_card(
+    body: InventoryCardAdd,
+    db: Annotated[Session, Depends(get_db)],
+):
+    printing = _require_card_cached(db, body.scryfall_id)
+    line = _merge_inventory_line(
+        db,
+        scryfall_id=printing.scryfall_id,
+        quantity=body.quantity,
+        foil=body.foil,
+        language=body.language.lower(),
+    )
+    db.commit()
+    db.refresh(line)
+    _log.info(
+        "Added inventory card scryfall_id=%s quantity=%s foil=%s",
+        printing.scryfall_id, body.quantity, body.foil,
+    )
+    return line
+
+
 @app.get("/api/inventory/grouped", response_model=list[InventoryOracleGroupOut])
 def list_grouped_inventory(
     db: Annotated[Session, Depends(get_db)],
@@ -873,6 +979,7 @@ def change_inventory_line_printing(
             target_foil=bool(payload.get("foil")),
             target_nonfoil=bool(payload.get("nonfoil")),
             target_language=payload.get("lang"),
+            quantity=body.quantity,
         )
     except InventoryPrintingError as exc:
         db.rollback()
@@ -899,6 +1006,11 @@ def change_inventory_printing(
     body: InventoryPrintingChange,
     db: Annotated[Session, Depends(get_db)],
 ):
+    if body.quantity is not None:
+        raise HTTPException(
+            422,
+            detail="A copy quantity can only be used when changing one inventory line",
+        )
     source = db.get(CardPrinting, source_scryfall_id)
     if source is None:
         raise HTTPException(404, detail="Inventory printing not found")
@@ -929,11 +1041,14 @@ def change_inventory_printing(
     )
 
 
-@app.delete("/api/inventory/{line_id}")
-def delete_inventory_line(line_id: int, db: Annotated[Session, Depends(get_db)]):
-    row = db.get(InventoryLine, line_id)
-    if row is None:
-        raise HTTPException(404, detail="Inventory line not found")
+def _validate_inventory_quantity_reduction(
+    db: Session,
+    row: InventoryLine,
+    new_quantity: int,
+) -> None:
+    removed_quantity = row.quantity - new_quantity
+    if removed_quantity <= 0:
+        return
     printing = db.get(CardPrinting, row.scryfall_id)
     if printing:
         exact_grabbed = int(
@@ -951,24 +1066,84 @@ def delete_inventory_line(line_id: int, db: Annotated[Session, Depends(get_db)])
             .scalar()
             or 0
         )
-        if owned_printing - row.quantity < exact_grabbed:
+        if owned_printing - removed_quantity < exact_grabbed:
             raise HTTPException(
                 409,
                 detail=(
-                    f"Cannot remove this printing: {exact_grabbed} copy/copies of it "
-                    "are assigned to decks. Change those allocations first."
+                    f"Cannot reduce this printing below {exact_grabbed}: that many "
+                    "copies are assigned exactly to decks. Change those allocations first."
                 ),
             )
-        remaining_owned = _owned_quantity_for_oracle(db, printing.oracle_id) - row.quantity
+        treatment_grabbed = int(
+            db.query(func.coalesce(func.sum(DeckCardAllocation.quantity), 0))
+            .filter(
+                DeckCardAllocation.scryfall_id == row.scryfall_id,
+                DeckCardAllocation.status == "grabbed",
+                DeckCardAllocation.foil.is_(row.foil),
+            )
+            .scalar()
+            or 0
+        )
+        owned_treatment = int(
+            db.query(func.coalesce(func.sum(InventoryLine.quantity), 0))
+            .filter(
+                InventoryLine.scryfall_id == row.scryfall_id,
+                InventoryLine.foil.is_(row.foil),
+            )
+            .scalar()
+            or 0
+        )
+        if owned_treatment - removed_quantity < treatment_grabbed:
+            treatment = "foil" if row.foil else "nonfoil"
+            raise HTTPException(
+                409,
+                detail=(
+                    f"Cannot reduce this {treatment} quantity below "
+                    f"{treatment_grabbed}: that many copies are assigned to decks."
+                ),
+            )
+        remaining_owned = (
+            _owned_quantity_for_oracle(db, printing.oracle_id) - removed_quantity
+        )
         grabbed = _grabbed_quantity_for_oracle(db, printing.oracle_id)
         if remaining_owned < grabbed:
             raise HTTPException(
                 409,
                 detail=(
-                    f"Cannot remove this inventory line: {grabbed} physical copy/copies "
-                    "are currently assigned to decks. Return them to 'Still to grab' first."
+                    f"Cannot reduce total ownership below {grabbed}: that many physical "
+                    "copies are currently assigned to decks. Return them to "
+                    "'Still to grab' first."
                 ),
             )
+
+
+@app.patch("/api/inventory/{line_id}", response_model=InventoryLineOut)
+def update_inventory_line_quantity(
+    line_id: int,
+    body: InventoryLineQuantityUpdate,
+    db: Annotated[Session, Depends(get_db)],
+):
+    row = db.get(InventoryLine, line_id)
+    if row is None:
+        raise HTTPException(404, detail="Inventory line not found")
+    previous_quantity = row.quantity
+    _validate_inventory_quantity_reduction(db, row, body.quantity)
+    row.quantity = body.quantity
+    db.commit()
+    db.refresh(row)
+    _log.info(
+        "Updated inventory quantity id=%s scryfall_id=%s previous=%s quantity=%s",
+        line_id, row.scryfall_id, previous_quantity, row.quantity,
+    )
+    return row
+
+
+@app.delete("/api/inventory/{line_id}")
+def delete_inventory_line(line_id: int, db: Annotated[Session, Depends(get_db)]):
+    row = db.get(InventoryLine, line_id)
+    if row is None:
+        raise HTTPException(404, detail="Inventory line not found")
+    _validate_inventory_quantity_reduction(db, row, 0)
     db.delete(row)
     db.commit()
     _log.info("Deleted inventory line id=%s scryfall_id=%s", line_id, row.scryfall_id)
@@ -1248,29 +1423,11 @@ def resolve_card(
         row = ensure_card_cached(db, query)
         if not row:
             raise HTTPException(404, detail="Unknown Scryfall card ID")
-        return CardResolveOut(
-            matches=[
-                CardResolveMatch(
-                    scryfall_id=row.scryfall_id,
-                    name=row.name,
-                    type_line=row.type_line,
-                    image_uri_normal=row.image_uri_normal,
-                )
-            ]
-        )
+        return CardResolveOut(matches=[CardResolveMatch.model_validate(row)])
     data = client.fetch_named(query, exact=True) or client.fetch_named(query, exact=False)
     if data:
         row = client.upsert_cache_from_scryfall(db, data)
-        return CardResolveOut(
-            matches=[
-                CardResolveMatch(
-                    scryfall_id=row.scryfall_id,
-                    name=row.name,
-                    type_line=row.type_line,
-                    image_uri_normal=row.image_uri_normal,
-                )
-            ]
-        )
+        return CardResolveOut(matches=[CardResolveMatch.model_validate(row)])
     found = client.search_cards(query, limit=12)
     if not found:
         raise HTTPException(404, detail="No cards found for that search")
@@ -1279,14 +1436,9 @@ def resolve_card(
         sf = d.get("id")
         if not sf:
             continue
-        matches.append(
-            CardResolveMatch(
-                scryfall_id=sf,
-                name=d.get("name") or "Unknown",
-                type_line=d.get("type_line"),
-                image_uri_normal=image_uri_normal_from_payload(d),
-            )
-        )
+        row = client.upsert_cache_from_scryfall(db, d, commit=False)
+        matches.append(CardResolveMatch.model_validate(row))
+    db.commit()
     return CardResolveOut(matches=matches)
 
 
@@ -1600,6 +1752,200 @@ def patch_deck(deck_id: int, body: DeckUpdate, db: Annotated[Session, Depends(ge
     return get_deck(deck_id, db)
 
 
+@app.put("/api/decks/{deck_id}/draft", response_model=DeckDetailOut)
+def save_deck_draft(
+    deck_id: int,
+    body: DeckDraftSave,
+    db: Annotated[Session, Depends(get_db)],
+):
+    """Atomically replace deck metadata, copies, statuses, and print selections."""
+    deck = db.get(Deck, deck_id)
+    if deck is None:
+        raise HTTPException(404, detail="Deck not found")
+    if not body.name.strip():
+        raise HTTPException(422, detail="Deck name is required")
+    commander_copies = [copy for copy in body.cards if copy.is_commander]
+    if len(commander_copies) > 1:
+        raise HTTPException(422, detail="A deck can have only one selected commander")
+
+    requested_ids = {
+        value
+        for copy in body.cards
+        for value in (copy.card_scryfall_id, copy.printing_scryfall_id)
+        if value
+    }
+    printings = {
+        scryfall_id: _require_card_cached(db, scryfall_id)
+        for scryfall_id in requested_ids
+    }
+    addition_ids = [
+        copy.collection_addition_id
+        for copy in body.cards
+        if copy.add_to_collection and copy.collection_addition_id
+    ]
+    if len(addition_ids) != len(set(addition_ids)):
+        raise HTTPException(422, detail="Collection addition IDs must be unique within a deck save")
+
+    grouped: dict[tuple[str, bool, bool], list] = {}
+    for copy in body.cards:
+        base = printings[copy.card_scryfall_id]
+        exact = printings.get(copy.printing_scryfall_id) if copy.printing_scryfall_id else None
+        if exact is not None and exact.oracle_id != base.oracle_id:
+            raise HTTPException(422, detail="Selected printing does not match its deck card")
+        if copy.add_to_collection and (
+            exact is None
+            or copy.status != "grabbed"
+            or copy.foil is None
+            or copy.collection_addition_id is None
+        ):
+            raise HTTPException(
+                422,
+                detail=(
+                    "A new collection copy must be grabbed with an exact printing "
+                    "and foil treatment, and include a collection addition ID"
+                ),
+            )
+        if copy.is_commander and copy.is_sideboard:
+            raise HTTPException(422, detail="A sideboard card cannot be the commander")
+        grouped.setdefault(
+            (base.oracle_id, copy.is_commander, copy.is_sideboard), []
+        ).append(copy)
+
+    existing_rows = db.query(DeckCard).filter(DeckCard.deck_id == deck_id).all()
+    existing_by_key: dict[tuple[str, bool, bool], DeckCard] = {}
+    for row in existing_rows:
+        key = (row.oracle_id, row.is_commander, row.is_sideboard)
+        if key in existing_by_key or key not in grouped:
+            db.delete(row)
+        else:
+            existing_by_key[key] = row
+    db.flush()
+
+    desired_rows: dict[tuple[str, bool, bool], DeckCard] = {}
+    try:
+        existing_additions = {
+            addition.addition_id: addition
+            for addition in db.query(DeckInventoryAddition).filter(
+                DeckInventoryAddition.addition_id.in_(addition_ids)
+            )
+        } if addition_ids else {}
+        for copy in body.cards:
+            if not copy.add_to_collection:
+                continue
+            addition_id = copy.collection_addition_id
+            scryfall_id = copy.printing_scryfall_id
+            foil = bool(copy.foil)
+            prior = existing_additions.get(addition_id)
+            if prior is not None:
+                if (
+                    prior.deck_id != deck_id
+                    or prior.scryfall_id != scryfall_id
+                    or prior.foil != foil
+                ):
+                    raise HTTPException(
+                        409,
+                        detail="A collection addition ID was already used for different card data",
+                    )
+                continue
+            _merge_inventory_line(
+                db,
+                scryfall_id=scryfall_id,
+                quantity=1,
+                foil=foil,
+            )
+            db.add(DeckInventoryAddition(
+                addition_id=addition_id,
+                deck_id=deck_id,
+                scryfall_id=scryfall_id,
+                foil=foil,
+            ))
+
+        for key, copies in grouped.items():
+            oracle_id, is_commander, is_sideboard = key
+            representative_id = next(
+                (
+                    copy.printing_scryfall_id
+                    for copy in copies
+                    if copy.printing_scryfall_id is not None
+                ),
+                copies[0].card_scryfall_id,
+            )
+            row = existing_by_key.get(key)
+            if row is None:
+                row = DeckCard(
+                    deck_id=deck_id,
+                    scryfall_id=representative_id,
+                    oracle_id=oracle_id,
+                    quantity=len(copies),
+                    is_commander=is_commander,
+                    is_sideboard=is_sideboard,
+                )
+                db.add(row)
+                db.flush()
+            else:
+                row.scryfall_id = representative_id
+                row.quantity = len(copies)
+                row.is_commander = is_commander
+                row.is_sideboard = is_sideboard
+                db.flush()
+                db.expire(row, ["card"])
+
+            allocation_counts: Counter[tuple[str, str | None, bool | None]] = Counter()
+            for copy in copies:
+                foil = copy.foil if copy.printing_scryfall_id else None
+                allocation_counts[(
+                    copy.status,
+                    copy.printing_scryfall_id,
+                    foil,
+                )] += 1
+            replace_deck_card_allocations(
+                db,
+                row,
+                [
+                    AllocationSpec(
+                        status=status,
+                        scryfall_id=scryfall_id,
+                        foil=foil,
+                        quantity=quantity,
+                    )
+                    for (status, scryfall_id, foil), quantity in allocation_counts.items()
+                ],
+            )
+            desired_rows[key] = row
+
+        deck.name = body.name.strip()
+        deck.format = body.format
+        deck.status = body.status
+        deck.notes = body.notes
+        if commander_copies:
+            commander_copy = commander_copies[0]
+            commander_oracle = printings[commander_copy.card_scryfall_id].oracle_id
+            target = desired_rows[(commander_oracle, True, False)]
+            _select_deck_commander(
+                db,
+                deck,
+                target,
+                format_name=body.format,
+                scryfall_id=(
+                    commander_copy.printing_scryfall_id
+                    or commander_copy.card_scryfall_id
+                ),
+            )
+        else:
+            for row in desired_rows.values():
+                row.is_commander = False
+            deck.commander_scryfall_id = None
+            deck.commander_oracle_id = None
+        db.commit()
+    except AllocationError as exc:
+        db.rollback()
+        raise HTTPException(exc.status_code, detail=str(exc)) from exc
+    except Exception:
+        db.rollback()
+        raise
+    return get_deck(deck_id, db)
+
+
 def _select_deck_commander(
     db: Session,
     deck: Deck,
@@ -1799,6 +2145,16 @@ async def import_csv_new_deck(
     db.commit()
     _log.info("Deck CSV import (new deck) deck_id=%s row_errors=%s", d.id, len(errors))
     return DeckCsvImportOut(deck=get_deck(d.id, db), row_errors=errors)
+
+
+@app.post("/api/decks/preview-csv")
+async def preview_deck_csv(
+    db: Annotated[Session, Depends(get_db)],
+    file: UploadFile = File(...),
+):
+    raw = _validate_upload_size(await file.read(settings.max_upload_bytes + 1))
+    text = raw.decode("utf-8-sig", errors="replace")
+    return _preview_deck_csv_rows(db, _deck_csv_reader(text))
 
 
 @app.post("/api/decks/{deck_id}/import-csv", response_model=DeckCsvImportOut)

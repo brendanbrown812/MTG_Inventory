@@ -594,3 +594,23 @@ def run_migrations(eng) -> None:
                 )
             conn.execute(text("INSERT INTO schema_versions (version) VALUES (11)"))
             conn.commit()
+
+        if 12 not in applied:
+            if not _table_exists(conn, "deck_inventory_additions"):
+                raise RuntimeError(
+                    "Migration 12 requires the deck_inventory_additions table"
+                )
+            columns = {
+                row[1] for row in conn.exec_driver_sql(
+                    "PRAGMA table_info('deck_inventory_additions')"
+                ).fetchall()
+            }
+            required = {"addition_id", "deck_id", "scryfall_id", "foil", "created_at"}
+            missing = required - columns
+            if missing:
+                raise RuntimeError(
+                    "Migration 12 deck inventory addition validation failed: "
+                    f"missing_columns={sorted(missing)}"
+                )
+            conn.execute(text("INSERT INTO schema_versions (version) VALUES (12)"))
+            conn.commit()

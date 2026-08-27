@@ -197,6 +197,22 @@ class DeckCardAllocation(Base):
     printing: Mapped[CardPrinting | None] = relationship()
 
 
+class DeckInventoryAddition(Base):
+    """Records a one-time inventory addition submitted with a deck draft."""
+
+    __tablename__ = "deck_inventory_additions"
+
+    addition_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    deck_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("decks.id", ondelete="CASCADE"), index=True
+    )
+    scryfall_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("card_printings.scryfall_id"), index=True
+    )
+    foil: Mapped[bool] = mapped_column(Boolean)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+
+
 class EnrichmentStats(Base):
     """Logs structured enrichment usage; keeps the legacy table name in place."""
 

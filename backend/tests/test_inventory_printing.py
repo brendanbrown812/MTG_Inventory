@@ -333,6 +333,76 @@ def test_line_correction_preserves_metadata_and_other_source_lines(
         )
 
 
+def test_line_correction_can_split_and_move_one_copy(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _seed_printings()
+    _mock_target(monkeypatch)
+    with SessionLocal() as db:
+        source = InventoryLine(
+            scryfall_id=SOURCE_ID,
+            quantity=2,
+            foil=False,
+            condition="near_mint",
+            language="en",
+            set_code="old",
+            collector_number="1",
+            purchase_price=3.5,
+            purchase_currency="USD",
+        )
+        db.add(source)
+        db.commit()
+        source_id = source.id
+
+    response = client.put(
+        f"/api/inventory/lines/{source_id}/printing",
+        json={"target_scryfall_id": TARGET_ID, "quantity": 1},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["moved_quantity"] == 1
+    with SessionLocal() as db:
+        retained = db.get(InventoryLine, source_id)
+        moved = db.query(InventoryLine).filter(
+            InventoryLine.scryfall_id == TARGET_ID
+        ).one()
+        assert (retained.scryfall_id, retained.quantity) == (SOURCE_ID, 1)
+        assert (
+            moved.quantity,
+            moved.foil,
+            moved.condition,
+            moved.language,
+            moved.set_code,
+            moved.collector_number,
+            moved.purchase_price,
+            moved.purchase_currency,
+        ) == (1, False, "near_mint", "en", "new", "42", 3.5, "USD")
+
+
+def test_line_correction_rejects_more_copies_than_the_line_contains(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _seed_printings()
+    _mock_target(monkeypatch)
+    with SessionLocal() as db:
+        source = InventoryLine(
+            scryfall_id=SOURCE_ID, quantity=2, foil=False, language="en"
+        )
+        db.add(source)
+        db.commit()
+        source_id = source.id
+
+    response = client.put(
+        f"/api/inventory/lines/{source_id}/printing",
+        json={"target_scryfall_id": TARGET_ID, "quantity": 3},
+    )
+
+    assert response.status_code == 422, response.text
+    assert "has 2" in response.json()["detail"]
+
+
 @pytest.mark.parametrize(
     ("line_foil", "line_language", "target_foil", "target_nonfoil", "target_language", "detail"),
     [
@@ -378,3 +448,111 @@ def test_line_correction_rejects_incompatible_treatment_or_language(
     assert detail in response.json()["detail"]
     with SessionLocal() as db:
         assert db.get(InventoryLine, line_id).scryfall_id == SOURCE_ID
+
+
+def test_inventory_line_quantity_can_be_corrected(client: TestClient) -> None:
+    _seed_printings()
+    with SessionLocal() as db:
+        line = InventoryLine(
+            scryfall_id=SOURCE_ID,
+            quantity=1,
+            foil=False,
+            condition="near_mint",
+            language="en",
+        )
+        db.add(line)
+        db.commit()
+        line_id = line.id
+
+    response = client.patch(
+        f"/api/inventory/{line_id}",
+        json={"quantity": 3},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["quantity"] == 3
+    grouped = client.get("/api/inventory/grouped").json()
+    assert grouped[0]["total_quantity"] == 3
+    assert grouped[0]["printings"][0]["nonfoil_quantity"] == 3
+
+
+def test_quantity_reduction_protects_exact_foil_assignments(
+    client: TestClient,
+) -> None:
+    _seed_printings()
+    with SessionLocal() as db:
+        foil_line = InventoryLine(
+            scryfall_id=SOURCE_ID, quantity=2, foil=True, language="en"
+        )
+        nonfoil_line = InventoryLine(
+            scryfall_id=SOURCE_ID, quantity=5, foil=False, language="en"
+        )
+        deck = Deck(name="Foil allocation")
+        db.add_all([foil_line, nonfoil_line, deck])
+        db.flush()
+        deck_card = DeckCard(
+            deck_id=deck.id,
+            scryfall_id=SOURCE_ID,
+            oracle_id=ORACLE_ID,
+            quantity=2,
+            grabbed_quantity=2,
+        )
+        db.add(deck_card)
+        db.flush()
+        db.add(DeckCardAllocation(
+            deck_card_id=deck_card.id,
+            scryfall_id=SOURCE_ID,
+            status="grabbed",
+            quantity=2,
+            foil=True,
+        ))
+        db.commit()
+        foil_line_id = foil_line.id
+
+    response = client.patch(
+        f"/api/inventory/{foil_line_id}",
+        json={"quantity": 1},
+    )
+
+    assert response.status_code == 409, response.text
+    assert "foil quantity below 2" in response.json()["detail"]
+    with SessionLocal() as db:
+        assert db.get(InventoryLine, foil_line_id).quantity == 2
+
+
+def test_quantity_reduction_protects_any_printing_grabbed_copies(
+    client: TestClient,
+) -> None:
+    _seed_printings()
+    with SessionLocal() as db:
+        line = InventoryLine(
+            scryfall_id=SOURCE_ID, quantity=2, foil=False, language="en"
+        )
+        deck = Deck(name="Any-printing allocation")
+        db.add_all([line, deck])
+        db.flush()
+        deck_card = DeckCard(
+            deck_id=deck.id,
+            scryfall_id=SOURCE_ID,
+            oracle_id=ORACLE_ID,
+            quantity=2,
+            grabbed_quantity=2,
+        )
+        db.add(deck_card)
+        db.flush()
+        db.add(DeckCardAllocation(
+            deck_card_id=deck_card.id,
+            scryfall_id=None,
+            status="grabbed",
+            quantity=2,
+        ))
+        db.commit()
+        line_id = line.id
+
+    response = client.patch(
+        f"/api/inventory/{line_id}",
+        json={"quantity": 1},
+    )
+
+    assert response.status_code == 409, response.text
+    assert "total ownership below 2" in response.json()["detail"]

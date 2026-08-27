@@ -8,6 +8,7 @@ import {
   fetchCardLocations,
   fetchCardMatches,
   fetchGroupedInventory,
+  updateInventoryLineQuantity,
   type CardLocationSummary,
   type DeckMatch,
   type InventoryOracleGroup,
@@ -16,6 +17,7 @@ import {
 } from "../api";
 import { PrintingCarousel } from "../components/PrintingCarousel";
 import { PrintChangePicker } from "../components/PrintChangePicker";
+import { AddInventoryCardModal } from "../components/AddInventoryCardModal";
 
 const CMC_VALUES = ["0", "1", "2", "3", "4", "5", "6+"] as const;
 
@@ -91,6 +93,7 @@ export default function InventoryPage() {
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
   const [clearing, setClearing] = useState(false);
+  const [addCardOpen, setAddCardOpen] = useState(false);
 
   // Filter state
   const [filterOpen, setFilterOpen] = useState(false);
@@ -109,6 +112,9 @@ export default function InventoryPage() {
   const [matches, setMatches] = useState<DeckMatch[] | null>(null);
   const [matchLoading, setMatchLoading] = useState(false);
   const [deletingId, setDeletingId] = useState<number | null>(null);
+  const [updatingQuantityId, setUpdatingQuantityId] = useState<number | null>(null);
+  const [quantityDrafts, setQuantityDrafts] = useState<Record<number, string>>({});
+  const [inventoryEditError, setInventoryEditError] = useState<string | null>(null);
   const [printChangeTarget, setPrintChangeTarget] = useState<PrintChangeTarget | null>(null);
 
   useEffect(() => {
@@ -232,12 +238,18 @@ export default function InventoryPage() {
     setMatches(null);
     setLocations(null);
     setPrintChangeTarget(null);
+    setQuantityDrafts({});
+    setInventoryEditError(null);
   }
 
-  async function applyPrintChange(targetScryfallId: string) {
+  async function applyPrintChange(targetScryfallId: string, quantity?: number) {
     if (!selected || !printChangeTarget) return;
     if (printChangeTarget.kind === "line") {
-      await changeInventoryLinePrinting(printChangeTarget.line.id, targetScryfallId);
+      await changeInventoryLinePrinting(
+        printChangeTarget.line.id,
+        targetScryfallId,
+        quantity,
+      );
     } else {
       await changeInventoryPrinting(printChangeTarget.sourceScryfallId, targetScryfallId);
     }
@@ -285,14 +297,53 @@ export default function InventoryPage() {
 
   async function removeInventoryLine(id: number) {
     setDeletingId(id);
+    setInventoryEditError(null);
     try {
       await deleteInventoryLine(id);
       closeModal();
       await load();
     } catch (e) {
-      setErr(e instanceof Error ? e.message : "Delete failed");
+      setInventoryEditError(e instanceof Error ? e.message : "Delete failed");
     } finally {
       setDeletingId(null);
+    }
+  }
+
+  async function saveInventoryQuantity(line: InventoryLine) {
+    if (!selected || !currentPrinting) return;
+    const rawQuantity = quantityDrafts[line.id] ?? String(line.quantity);
+    const quantity = Number(rawQuantity);
+    if (!Number.isInteger(quantity) || quantity < 1) {
+      setInventoryEditError("Quantity must be a whole number of at least 1.");
+      return;
+    }
+    setUpdatingQuantityId(line.id);
+    setInventoryEditError(null);
+    try {
+      await updateInventoryLineQuantity(line.id, quantity);
+      const selectedPrintingId = currentPrinting.scryfall_id;
+      const [pageGroups, selectedGroups, nextLocations] = await Promise.all([
+        fetchGroupedInventory(debouncedQ),
+        fetchGroupedInventory(selected.card.name),
+        fetchCardLocations(selectedPrintingId),
+      ]);
+      const refreshed = selectedGroups.find(
+        (group) => group.oracle_id === selected.oracle_id,
+      );
+      setGroups(pageGroups);
+      if (refreshed) setSelected(refreshed);
+      setLocations(nextLocations);
+      setQuantityDrafts((previous) => {
+        const next = { ...previous };
+        delete next[line.id];
+        return next;
+      });
+    } catch (e) {
+      setInventoryEditError(
+        e instanceof Error ? e.message : "Could not update inventory quantity",
+      );
+    } finally {
+      setUpdatingQuantityId(null);
     }
   }
 
@@ -328,6 +379,13 @@ export default function InventoryPage() {
           <p className="mt-2 text-stone-400">Click any card to view details and deck suggestions.</p>
         </div>
         <div className="flex flex-wrap gap-3">
+          <button
+            type="button"
+            onClick={() => setAddCardOpen(true)}
+            className="rounded-xl border border-emerald-400/30 bg-emerald-500/10 px-4 py-2.5 text-sm font-medium text-emerald-200 transition hover:bg-emerald-500/20"
+          >
+            Add New Card
+          </button>
           <input
             value={q}
             onChange={(e) => setQ(e.target.value)}
@@ -368,6 +426,13 @@ export default function InventoryPage() {
 
       {err && (
         <div className="rounded-xl border border-red-500/30 bg-red-950/40 px-4 py-3 text-sm text-red-200">{err}</div>
+      )}
+
+      {addCardOpen && (
+        <AddInventoryCardModal
+          onClose={() => setAddCardOpen(false)}
+          onAdded={load}
+        />
       )}
 
       {!loading && groups.length > 0 && (
@@ -607,11 +672,12 @@ export default function InventoryPage() {
                     sourceScryfallId={printChangeTarget.sourceScryfallId}
                     title={printChangeTarget.kind === "line" ? "Change this inventory line" : "Change this entire printing"}
                     description={printChangeTarget.kind === "line"
-                      ? `Move all ${printChangeTarget.line.quantity} copies in this ${printChangeTarget.line.foil ? "foil" : "nonfoil"} line to another printing.`
+                      ? `Choose how many copies in this ${printChangeTarget.line.foil ? "foil" : "nonfoil"} line to move to another printing.`
                       : `Move all ${correctionPrinting?.total_quantity ?? 0} copies across ${correctionLines.length} inventory ${correctionLines.length === 1 ? "line" : "lines"}. Exact deck assignments will follow the corrected printing.`}
                     requiresFoil={correctionLines.some((line) => line.foil)}
                     requiresNonfoil={correctionLines.some((line) => !line.foil)}
                     languages={correctionLines.flatMap((line) => line.language ? [line.language] : [])}
+                    maxQuantity={printChangeTarget.kind === "line" ? printChangeTarget.line.quantity : undefined}
                     onCancel={() => setPrintChangeTarget(null)}
                     onApply={applyPrintChange}
                   />
@@ -659,6 +725,37 @@ export default function InventoryPage() {
                             <p className="mt-0.5 truncate text-stone-500">
                               {[line.condition, line.language?.toUpperCase()].filter(Boolean).join(" · ") || "No condition details"}
                             </p>
+                            <div className="mt-2 flex items-end gap-2">
+                              <label className="text-[10px] font-medium uppercase tracking-wider text-stone-500">
+                                Quantity
+                                <input
+                                  type="number"
+                                  min={1}
+                                  max={999999}
+                                  step={1}
+                                  value={quantityDrafts[line.id] ?? String(line.quantity)}
+                                  onChange={(event) => setQuantityDrafts((previous) => ({
+                                    ...previous,
+                                    [line.id]: event.target.value,
+                                  }))}
+                                  onKeyDown={(event) => {
+                                    if (event.key === "Enter") void saveInventoryQuantity(line);
+                                  }}
+                                  className="mt-1 block w-20 rounded-lg border border-white/10 bg-ink-950 px-2 py-1.5 font-mono text-xs normal-case tracking-normal text-stone-200 outline-none focus:ring-1 focus:ring-ember-400/40"
+                                />
+                              </label>
+                              <button
+                                type="button"
+                                disabled={
+                                  updatingQuantityId === line.id
+                                  || (quantityDrafts[line.id] ?? String(line.quantity)) === String(line.quantity)
+                                }
+                                onClick={() => void saveInventoryQuantity(line)}
+                                className="rounded-lg border border-emerald-400/25 px-2.5 py-1.5 text-[10px] font-medium text-emerald-300 transition hover:bg-emerald-950/40 disabled:opacity-40"
+                              >
+                                {updatingQuantityId === line.id ? "Saving…" : "Save quantity"}
+                              </button>
+                            </div>
                           </div>
                           <div className="flex shrink-0 gap-1.5">
                             <button
@@ -684,6 +781,11 @@ export default function InventoryPage() {
                         </div>
                       ))}
                     </div>
+                    {inventoryEditError && (
+                      <div className="mt-3 rounded-xl border border-red-500/30 bg-red-950/40 px-3 py-2 text-xs text-red-200">
+                        {inventoryEditError}
+                      </div>
+                    )}
                   </div>
                 )}
 

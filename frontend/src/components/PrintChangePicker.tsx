@@ -18,6 +18,7 @@ export function PrintChangePicker({
   requiresFoil,
   requiresNonfoil,
   languages,
+  maxQuantity,
   onCancel,
   onApply,
 }: {
@@ -27,8 +28,9 @@ export function PrintChangePicker({
   requiresFoil: boolean;
   requiresNonfoil: boolean;
   languages: string[];
+  maxQuantity?: number;
   onCancel: () => void;
-  onApply: (targetScryfallId: string) => Promise<void>;
+  onApply: (targetScryfallId: string, quantity?: number) => Promise<void>;
 }) {
   const [options, setOptions] = useState<PrintingOption[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -36,6 +38,7 @@ export function PrintChangePicker({
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [moveQuantity, setMoveQuantity] = useState(1);
 
   useEffect(() => {
     let cancelled = false;
@@ -84,10 +87,17 @@ export function PrintChangePicker({
 
   async function apply() {
     if (!selectedId) return;
+    if (
+      maxQuantity !== undefined
+      && (!Number.isInteger(moveQuantity) || moveQuantity < 1 || moveQuantity > maxQuantity)
+    ) {
+      setError(`Choose a whole number from 1 to ${maxQuantity}.`);
+      return;
+    }
     setSaving(true);
     setError(null);
     try {
-      await onApply(selectedId);
+      await onApply(selectedId, maxQuantity === undefined ? undefined : moveQuantity);
     } catch (reason) {
       setError(readableError(reason));
     } finally {
@@ -117,6 +127,23 @@ export function PrintChangePicker({
             placeholder="Filter by set, code, collector number, or year…"
             className="mt-4 w-full rounded-xl border border-white/10 bg-ink-950/60 px-3 py-2 text-xs text-stone-200 outline-none placeholder:text-stone-600 focus:ring-2 focus:ring-arcane-400/35"
           />
+          {maxQuantity !== undefined && (
+            <label className="mt-3 block text-[10px] font-medium uppercase tracking-wider text-stone-500">
+              Copies to move
+              <input
+                type="number"
+                min={1}
+                max={maxQuantity}
+                step={1}
+                value={moveQuantity}
+                onChange={(event) => setMoveQuantity(Number(event.target.value))}
+                className="mt-1 block w-28 rounded-xl border border-white/10 bg-ink-950/60 px-3 py-2 font-mono text-sm normal-case tracking-normal text-stone-200 outline-none focus:ring-2 focus:ring-ember-400/35"
+              />
+              <span className="mt-1 block normal-case tracking-normal text-stone-600">
+                {maxQuantity} available in this inventory line
+              </span>
+            </label>
+          )}
           <p className="mt-2 text-[10px] text-stone-500">{visibleOptions.length} of {options.length} printings</p>
           <div className="mt-2 grid max-h-[46vh] grid-cols-2 gap-3 overflow-y-auto pr-1 sm:grid-cols-3">
           {visibleOptions.map((option) => {
@@ -165,7 +192,11 @@ export function PrintChangePicker({
       <div className="mt-4 flex justify-end gap-2">
         <button type="button" onClick={onCancel} className="rounded-xl border border-white/10 px-4 py-2 text-xs text-stone-400 hover:bg-white/5">Cancel</button>
         <button type="button" disabled={!selectedId || saving} onClick={() => void apply()} className="rounded-xl bg-emerald-500/20 px-4 py-2 text-xs font-medium text-emerald-100 ring-1 ring-emerald-400/30 disabled:opacity-40">
-          {saving ? "Applying…" : "Apply change"}
+          {saving
+            ? "Applying…"
+            : maxQuantity !== undefined
+              ? `Move ${moveQuantity} ${moveQuantity === 1 ? "copy" : "copies"}`
+              : "Apply change"}
         </button>
       </div>
     </section>

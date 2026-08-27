@@ -2,11 +2,13 @@ import { useEffect, useMemo, useState } from "react";
 import {
   fetchGroupedInventory,
   replaceDeckCardAllocations,
+  resolveCard,
   setDeckCommander,
   type DeckCard,
   type DeckDetail,
   type InventoryPrinting,
 } from "../api";
+import { AddCardPrintingPicker } from "./AddCardPrintingPicker";
 import { PrintingCarousel } from "./PrintingCarousel";
 
 export type DeckAllocationUnit = {
@@ -82,6 +84,9 @@ export function DeckPrintingModal({
   initialUnitIndex = 0,
   onClose,
   onSaved,
+  onDraftSaved,
+  onDraftCommanderSelected,
+  onDraftCardAdded,
   allowCommanderSelection = false,
   currentCommanderName = null,
 }: {
@@ -89,7 +94,10 @@ export function DeckPrintingModal({
   deckCard: DeckCard;
   initialUnitIndex?: number;
   onClose: () => void;
-  onSaved: (deck: DeckDetail) => void;
+  onSaved?: (deck: DeckDetail) => void;
+  onDraftSaved?: (deckCard: DeckCard) => void;
+  onDraftCommanderSelected?: () => void;
+  onDraftCardAdded?: (card: NonNullable<DeckCard["card"]>, quantity: number, foil: boolean) => void;
   allowCommanderSelection?: boolean;
   currentCommanderName?: string | null;
 }) {
@@ -105,6 +113,7 @@ export function DeckPrintingModal({
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [commanderSaving, setCommanderSaving] = useState(false);
+  const [addPrintingOpen, setAddPrintingOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -174,12 +183,32 @@ export function DeckPrintingModal({
     setSaving(true);
     setError(null);
     try {
+      const grouped = groupDeckAllocationUnits(nextUnits);
+      if (onDraftSaved) {
+        onDraftSaved({
+          ...deckCard,
+          grabbed_quantity: grouped
+            .filter((allocation) => allocation.status === "grabbed")
+            .reduce((sum, allocation) => sum + allocation.quantity, 0),
+          proxy_quantity: grouped
+            .filter((allocation) => allocation.status === "proxy")
+            .reduce((sum, allocation) => sum + allocation.quantity, 0),
+          allocations: grouped.map((allocation, index) => ({
+            id: -(index + 1),
+            ...allocation,
+            printing: allocation.scryfall_id
+              ? printings.find((printing) => printing.scryfall_id === allocation.scryfall_id)?.card ?? null
+              : null,
+          })),
+        });
+        return;
+      }
       const updated = await replaceDeckCardAllocations(
         deckId,
         deckCard.id,
-        groupDeckAllocationUnits(nextUnits),
+        grouped,
       );
-      onSaved(updated);
+      onSaved?.(updated);
     } catch (reason) {
       setError(readableError(reason));
     } finally {
@@ -195,7 +224,11 @@ export function DeckPrintingModal({
     setCommanderSaving(true);
     setError(null);
     try {
-      onSaved(await setDeckCommander(deckId, deckCard.id));
+      if (onDraftCommanderSelected) {
+        onDraftCommanderSelected();
+        return;
+      }
+      onSaved?.(await setDeckCommander(deckId, deckCard.id));
     } catch (reason) {
       setError(readableError(reason));
     } finally {
@@ -247,11 +280,37 @@ export function DeckPrintingModal({
                   {commanderSaving ? "Selecting…" : "Make commander"}
                 </button>
               ) : null}
+              {onDraftCardAdded && (
+                <button
+                  type="button"
+                  onClick={() => setAddPrintingOpen(true)}
+                  className="mt-3 rounded-lg border border-emerald-400/25 px-3 py-1.5 text-xs font-medium text-emerald-200 transition hover:bg-emerald-500/15"
+                >
+                  Add new card
+                </button>
+              )}
             </div>
             <button type="button" onClick={onClose} className="rounded-lg px-2 py-1 text-stone-500 hover:bg-white/5 hover:text-stone-200" aria-label="Close">✕</button>
           </div>
 
-          <div className="mt-5 grid gap-4 sm:grid-cols-2">
+          {addPrintingOpen && onDraftCardAdded && (
+            <div className="mt-5">
+              <AddCardPrintingPicker
+                sourceScryfallId={deckCard.scryfall_id}
+                title={`Add another ${cardName}`}
+                description="Choose the exact new physical copy. It will be added to this deck draft and your collection together when you save the deck."
+                onCancel={() => setAddPrintingOpen(false)}
+                onAdd={async (printing, quantity, foil) => {
+                  const result = await resolveCard(printing.scryfall_id);
+                  const card = result.matches[0];
+                  if (!card) throw new Error("Could not load the selected printing");
+                  onDraftCardAdded(card, quantity, foil);
+                }}
+              />
+            </div>
+          )}
+
+          {!addPrintingOpen && <div className="mt-5 grid gap-4 sm:grid-cols-2">
             <label className="text-xs font-medium uppercase tracking-wider text-stone-500">
               Deck copy
               <select value={unitIndex} onChange={(event) => chooseUnit(Number(event.target.value))} className="mt-1 block w-full rounded-xl border border-white/10 bg-ink-950/60 px-3 py-2 text-sm normal-case tracking-normal text-stone-200">
@@ -267,9 +326,9 @@ export function DeckPrintingModal({
                 {selectedUnit?.foil === true ? " · foil" : selectedUnit?.foil === false ? " · nonfoil" : ""}
               </p>
             </div>
-          </div>
+          </div>}
 
-          <div className="mt-5 rounded-xl border border-white/10 bg-ink-950/45 p-4">
+          {!addPrintingOpen && <div className="mt-5 rounded-xl border border-white/10 bg-ink-950/45 p-4">
             <div className="flex items-center justify-between gap-3">
               <div>
                 <p className="text-xs font-medium uppercase tracking-wider text-stone-500">Printing used in this deck</p>
@@ -317,16 +376,16 @@ export function DeckPrintingModal({
             ) : (
               <p className="mt-3 text-xs text-stone-500">Spellbinder may use any owned printing of this card for this deck copy.</p>
             )}
-          </div>
+          </div>}
 
           {error && <div className="mt-4 rounded-xl border border-red-500/30 bg-red-950/40 px-3 py-2 text-xs text-red-200">{error}</div>}
 
-          <div className="mt-6 flex justify-end gap-3">
+          {!addPrintingOpen && <div className="mt-6 flex justify-end gap-3">
             <button type="button" onClick={onClose} className="rounded-xl border border-white/10 px-4 py-2 text-sm text-stone-400 hover:bg-white/5">Cancel</button>
             <button type="button" disabled={saving || loading || Boolean(selectedPrinting && selectedPrinting.foil_quantity > 0 && selectedPrinting.nonfoil_quantity > 0 && selectedFoil === null)} onClick={() => void save()} className="rounded-xl bg-emerald-500/20 px-4 py-2 text-sm font-medium text-emerald-100 ring-1 ring-emerald-400/30 disabled:opacity-40">
               {saving ? "Saving…" : "Save printing"}
             </button>
-          </div>
+          </div>}
         </div>
       </div>
     </div>
