@@ -28,7 +28,7 @@ function AppShell() {
             className="group flex items-baseline gap-3 rounded-lg outline-none ring-ember-400/0 transition hover:opacity-90 focus-visible:ring-2 focus-visible:ring-ember-400/50"
           >
             <span className="font-display text-2xl font-semibold tracking-tight text-stone-100 sm:text-3xl">
-              Spellbinderr
+              Spellbinder
             </span>
             <span className="hidden text-sm text-stone-500 group-hover:text-stone-400 sm:inline">
               inventory & decks
