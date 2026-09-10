@@ -277,6 +277,45 @@ export async function clearInventory(): Promise<{ deleted: number }> {
   return r.json();
 }
 
+export async function downloadCollectionBackup(): Promise<void> {
+  const r = await fetch(`${base}/api/export/collection`);
+  if (!r.ok) {
+    const payload = await r.json().catch(() => null) as { detail?: string } | null;
+    throw new Error(payload?.detail ?? "Could not export the collection");
+  }
+  const disposition = r.headers.get("Content-Disposition") ?? "";
+  const filename = disposition.match(/filename="?([^";]+)"?/i)?.[1]
+    ?? `spellbinder-collection-${new Date().toISOString().slice(0, 10)}.json.gz`;
+  const url = URL.createObjectURL(await r.blob());
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(url);
+}
+
+export type CollectionImportResult = {
+  physical_cards: number;
+  unique_cards: number;
+  inventory_lines: number;
+  mechanic_profiles: number;
+  embeddings: number;
+  card_preferences: number;
+};
+
+export async function importCollectionBackup(file: File): Promise<CollectionImportResult> {
+  const body = new FormData();
+  body.append("file", file);
+  const r = await fetch(`${base}/api/import/collection`, { method: "POST", body });
+  if (!r.ok) {
+    const payload = await r.json().catch(() => null) as { detail?: string } | null;
+    throw new Error(payload?.detail ?? `Collection import failed (HTTP ${r.status})`);
+  }
+  return r.json();
+}
+
 export type PrintingOption = {
   scryfall_id: string;
   name: string;
@@ -378,6 +417,64 @@ export async function fetchDecks(): Promise<Deck[]> {
 export async function fetchDeck(id: number): Promise<DeckDetail> {
   const r = await fetch(`${base}/api/decks/${id}`);
   if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+
+export async function downloadDeckBackup(deckId: number, deckName: string): Promise<void> {
+  const r = await fetch(`${base}/api/decks/${deckId}/export`);
+  if (!r.ok) {
+    const payload = await r.json().catch(() => null) as { detail?: string } | null;
+    throw new Error(payload?.detail ?? "Could not export the deck");
+  }
+  const fallbackName = deckName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+  const disposition = r.headers.get("Content-Disposition") ?? "";
+  const filename = disposition.match(/filename="?([^";]+)"?/i)?.[1]
+    ?? `spellbinder-deck-${fallbackName || deckId}.json.gz`;
+  const url = URL.createObjectURL(await r.blob());
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(url);
+}
+
+export type DeckBackupPreview = {
+  name: string;
+  format: string;
+  status: string;
+  total_cards: number;
+  grabbed_cards: number;
+  proxy_cards: number;
+  sideboard_cards: number;
+};
+
+export async function previewDeckBackup(file: File): Promise<DeckBackupPreview> {
+  const body = new FormData();
+  body.append("file", file);
+  const r = await fetch(`${base}/api/decks/preview-backup`, { method: "POST", body });
+  if (!r.ok) {
+    const payload = await r.json().catch(() => null) as { detail?: string } | null;
+    throw new Error(payload?.detail ?? "Could not read the deck backup");
+  }
+  return r.json();
+}
+
+export async function importDeckBackup(
+  file: File,
+  name: string,
+  preservePositions: boolean,
+): Promise<DeckDetail> {
+  const body = new FormData();
+  body.append("file", file);
+  body.append("name", name);
+  body.append("preserve_positions", String(preservePositions));
+  const r = await fetch(`${base}/api/decks/import-backup`, { method: "POST", body });
+  if (!r.ok) {
+    const payload = await r.json().catch(() => null) as { detail?: string } | null;
+    throw new Error(payload?.detail ?? `Deck import failed (HTTP ${r.status})`);
+  }
   return r.json();
 }
 

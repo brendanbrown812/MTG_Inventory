@@ -1,7 +1,14 @@
 import { useCallback, useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import { Link } from "react-router-dom";
-import { fetchManaboxImportProgress, importManabox, type ImportRowResult, type ManaboxProgress } from "../api";
+import {
+  fetchManaboxImportProgress,
+  importCollectionBackup,
+  importManabox,
+  type CollectionImportResult,
+  type ImportRowResult,
+  type ManaboxProgress,
+} from "../api";
 
 export default function ImportPage() {
   const [file, setFile] = useState<File | null>(null);
@@ -10,6 +17,10 @@ export default function ImportPage() {
   const [result, setResult] = useState<{ added_quantity: number; rows: ImportRowResult[] } | null>(null);
   const [progress, setProgress] = useState<ManaboxProgress | null>(null);
   const [selected, setSelected] = useState<ImportRowResult | null>(null);
+  const [backupFile, setBackupFile] = useState<File | null>(null);
+  const [backupBusy, setBackupBusy] = useState(false);
+  const [backupError, setBackupError] = useState<string | null>(null);
+  const [backupResult, setBackupResult] = useState<CollectionImportResult | null>(null);
 
   useEffect(() => {
     if (!selected) return;
@@ -56,6 +67,23 @@ export default function ImportPage() {
     }
   }
 
+  async function runBackupImport() {
+    if (!backupFile) return;
+    if (!window.confirm(
+      "Restore this collection snapshot? Current collection quantities will be replaced. Decks and deck locations will not be changed.",
+    )) return;
+    setBackupBusy(true);
+    setBackupError(null);
+    setBackupResult(null);
+    try {
+      setBackupResult(await importCollectionBackup(backupFile));
+    } catch (e) {
+      setBackupError(e instanceof Error ? e.message : "Collection backup import failed");
+    } finally {
+      setBackupBusy(false);
+    }
+  }
+
   const okRows = result?.rows.filter((r) => r.ok) ?? [];
   const badRows = result?.rows.filter((r) => !r.ok) ?? [];
   const withMatches = okRows.filter((r) => r.matches.length > 0);
@@ -71,6 +99,52 @@ export default function ImportPage() {
           language, hydrate from Scryfall, then score new lines against your decks.
         </p>
       </div>
+
+      <section className="rounded-2xl border border-arcane-400/20 bg-arcane-500/5 p-6 shadow-card">
+        <h2 className="font-display text-2xl text-stone-100">Restore a Spellbinder collection</h2>
+        <p className="mt-2 max-w-3xl text-sm text-stone-400">
+          Import a collection backup exported from another Spellbinder installation. This restores exact holdings,
+          cached card records, mechanic profiles, semantic embeddings, and learned card preferences without calling
+          Scryfall or an AI provider. Decks are not included.
+        </p>
+        <div className="mt-5 flex flex-wrap items-center gap-3">
+          <label className="cursor-pointer rounded-xl border border-dashed border-arcane-400/30 bg-ink-950/40 px-4 py-2.5 text-sm text-stone-200 hover:bg-ink-900/70">
+            <input
+              type="file"
+              accept=".json,.gz,.json.gz,application/json,application/gzip"
+              className="hidden"
+              onChange={(event) => {
+                setBackupFile(event.target.files?.[0] ?? null);
+                setBackupResult(null);
+                setBackupError(null);
+              }}
+            />
+            {backupFile?.name ?? "Choose collection backup…"}
+          </label>
+          <button
+            type="button"
+            disabled={!backupFile || backupBusy}
+            onClick={() => void runBackupImport()}
+            className="rounded-xl bg-arcane-500/20 px-5 py-2.5 text-sm font-medium text-arcane-100 ring-1 ring-arcane-400/30 enabled:hover:bg-arcane-500/30 disabled:opacity-40"
+          >
+            {backupBusy ? "Restoring…" : "Restore collection"}
+          </button>
+        </div>
+        {backupError && (
+          <div className="mt-4 rounded-xl border border-red-500/30 bg-red-950/40 px-4 py-3 text-sm text-red-200">
+            {backupError}
+          </div>
+        )}
+        {backupResult && (
+          <div className="mt-4 rounded-xl border border-emerald-500/25 bg-emerald-950/25 px-4 py-3 text-sm text-emerald-200">
+            Restored {backupResult.physical_cards.toLocaleString()} physical cards across{" "}
+            {backupResult.unique_cards.toLocaleString()} unique cards, including{" "}
+            {backupResult.mechanic_profiles.toLocaleString()} mechanic profiles and{" "}
+            {backupResult.embeddings.toLocaleString()} embeddings.{" "}
+            <Link to="/" className="underline underline-offset-2 hover:text-emerald-100">View collection →</Link>
+          </div>
+        )}
+      </section>
 
       <div
         onDragOver={(e) => e.preventDefault()}

@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -42,6 +43,154 @@ class InventoryCardAdd(BaseModel):
     quantity: int = Field(default=1, ge=1, le=999_999)
     foil: bool = False
     language: str = Field(default="en", min_length=2, max_length=10)
+
+
+class CollectionOracleCardBackup(BaseModel):
+    oracle_id: str = Field(min_length=36, max_length=36)
+    name: str = Field(min_length=1, max_length=500)
+    type_line: str | None = None
+    oracle_text: str | None = None
+    mana_cost: str | None = None
+    cmc: float = 0
+    colors: str = ""
+    color_identity: str = ""
+    legalities_json: str | None = None
+    keywords: str | None = None
+    synergy_tags: str | None = None
+    tagged_at: datetime | None = None
+    updated_at: datetime
+
+
+class CollectionPrintingBackup(BaseModel):
+    scryfall_id: str = Field(min_length=36, max_length=36)
+    oracle_id: str = Field(min_length=36, max_length=36)
+    set_code: str | None = None
+    collector_number: str | None = None
+    rarity: str | None = None
+    language: str | None = None
+    image_uri_normal: str | None = None
+    scryfall_json: str | None = None
+    updated_at: datetime
+
+
+class CollectionInventoryLineBackup(BaseModel):
+    scryfall_id: str = Field(min_length=36, max_length=36)
+    quantity: int = Field(ge=1, le=999_999)
+    foil: bool = False
+    misprint: bool = False
+    altered: bool = False
+    condition: str | None = None
+    language: str | None = None
+    set_code: str | None = None
+    collector_number: str | None = None
+    purchase_price: float | None = None
+    purchase_currency: str | None = None
+    manabox_id: str | None = None
+
+
+class CollectionMechanicProfileBackup(BaseModel):
+    oracle_id: str = Field(min_length=36, max_length=36)
+    schema_version: str
+    taxonomy_version: str
+    profile_json: str
+    provider: str
+    model: str
+    confidence: float
+    is_current: bool
+    input_tokens: int = Field(ge=0)
+    output_tokens: int = Field(ge=0)
+    created_at: datetime
+
+
+class CollectionEmbeddingBackup(BaseModel):
+    oracle_id: str = Field(min_length=36, max_length=36)
+    provider: str
+    model: str
+    index_version: str
+    dimensions: int = Field(ge=1)
+    source_hash: str
+    vector_base64: str
+    is_current: bool
+    input_tokens: int = Field(ge=0)
+    created_at: datetime
+
+
+class CollectionCardPreferenceBackup(BaseModel):
+    oracle_id: str = Field(min_length=36, max_length=36)
+    accepted_count: int = Field(ge=0)
+    rejected_count: int = Field(ge=0)
+    updated_at: datetime
+
+
+class CollectionBackup(BaseModel):
+    format: Literal["spellbinder.collection"]
+    version: Literal[1]
+    exported_at: datetime
+    oracle_cards: list[CollectionOracleCardBackup] = Field(max_length=100_000)
+    printings: list[CollectionPrintingBackup] = Field(max_length=100_000)
+    inventory_lines: list[CollectionInventoryLineBackup] = Field(max_length=250_000)
+    mechanic_profiles: list[CollectionMechanicProfileBackup] = Field(max_length=500_000)
+    embeddings: list[CollectionEmbeddingBackup] = Field(max_length=500_000)
+    card_preferences: list[CollectionCardPreferenceBackup] = Field(max_length=100_000)
+
+
+class CollectionImportResult(BaseModel):
+    physical_cards: int
+    unique_cards: int
+    inventory_lines: int
+    mechanic_profiles: int
+    embeddings: int
+    card_preferences: int
+
+
+class DeckBackupMetadata(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    format: str = Field(min_length=1, max_length=40)
+    status: str = Field(min_length=1, max_length=20)
+    notes: str | None = Field(default=None, max_length=50_000)
+    commander_scryfall_id: str | None = Field(default=None, min_length=36, max_length=36)
+    commander_oracle_id: str | None = Field(default=None, min_length=36, max_length=36)
+
+
+class DeckBackupAllocation(BaseModel):
+    scryfall_id: str | None = Field(default=None, min_length=36, max_length=36)
+    status: Literal["pending", "grabbed", "proxy"]
+    quantity: int = Field(ge=1, le=999)
+    foil: bool | None = None
+
+
+class DeckBackupCard(BaseModel):
+    scryfall_id: str = Field(min_length=36, max_length=36)
+    oracle_id: str = Field(min_length=36, max_length=36)
+    quantity: int = Field(ge=1, le=999)
+    grabbed_quantity: int = Field(ge=0, le=999)
+    proxy_quantity: int = Field(ge=0, le=999)
+    is_commander: bool = False
+    is_sideboard: bool = False
+    allocations: list[DeckBackupAllocation] = Field(min_length=1, max_length=1_000)
+
+
+class DeckBackup(BaseModel):
+    format: Literal["spellbinder.deck"]
+    version: Literal[1]
+    exported_at: datetime
+    deck: DeckBackupMetadata
+    cards: list[DeckBackupCard] = Field(max_length=1_000)
+    oracle_cards: list[CollectionOracleCardBackup] = Field(max_length=10_000)
+    printings: list[CollectionPrintingBackup] = Field(max_length=25_000)
+    mechanic_profiles: list[CollectionMechanicProfileBackup] = Field(max_length=50_000)
+    embeddings: list[CollectionEmbeddingBackup] = Field(max_length=50_000)
+    card_preferences: list[CollectionCardPreferenceBackup] = Field(max_length=10_000)
+
+
+class DeckBackupPreview(BaseModel):
+    name: str
+    format: str
+    status: str
+    total_cards: int
+    grabbed_cards: int
+    proxy_cards: int
+    sideboard_cards: int
 
 
 class InventoryPrintingOut(BaseModel):

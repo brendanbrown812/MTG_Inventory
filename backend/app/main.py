@@ -1,4 +1,5 @@
 import csv
+import gzip
 import io
 import json
 import re
@@ -12,7 +13,7 @@ from typing import Annotated
 import httpx
 from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
 from sqlalchemy import func
 from sqlalchemy import text as sa_text
@@ -42,7 +43,9 @@ from app.schemas import (
     CardResolveMatch,
     CardResolveOut,
     ClearInventoryResult,
+    CollectionImportResult,
     DeckAssemblyBatchUpdate,
+    DeckBackupPreview,
     DeckCardAllocationReplace,
     DeckCardAssemblyUpdate,
     DeckCardIn,
@@ -65,6 +68,12 @@ from app.schemas import (
     PrintingOptionOut,
 )
 from app.services.matcher import match_new_cards
+from app.services.collection_transfer import (
+    build_collection_backup,
+    parse_collection_backup,
+    restore_collection_backup,
+)
+from app.services.deck_transfer import build_deck_backup, import_deck_backup, parse_deck_backup
 from app.services.inventory_printing import (
     InventoryPrintingError,
     correct_inventory_line_printing,
@@ -147,7 +156,16 @@ async def require_api_key(request: Request, call_next):
     content_length = request.headers.get("Content-Length")
     if content_length:
         try:
-            if int(content_length) > settings.max_request_bytes:
+            request_limit = (
+                settings.max_collection_transfer_bytes + (1024 * 1024)
+                if request.url.path in {
+                    "/api/import/collection",
+                    "/api/decks/import-backup",
+                    "/api/decks/preview-backup",
+                }
+                else settings.max_request_bytes
+            )
+            if int(content_length) > request_limit:
                 return JSONResponse(status_code=413, content={"detail": "Request body is too large"})
         except ValueError:
             return JSONResponse(status_code=400, content={"detail": "Invalid Content-Length header"})
@@ -178,6 +196,28 @@ def _validate_upload_size(raw: bytes) -> bytes:
     if len(raw) > settings.max_upload_bytes:
         max_mb = settings.max_upload_bytes / (1024 * 1024)
         raise HTTPException(413, detail=f"Upload exceeds the {max_mb:g} MB limit")
+    return raw
+
+
+def _read_portable_backup(file: UploadFile, *, label: str) -> bytes:
+    limit = settings.max_collection_transfer_bytes
+    uploaded = file.file.read(limit + 1)
+    if len(uploaded) > limit:
+        raise HTTPException(413, detail=f"{label} backup exceeds the transfer limit")
+    try:
+        if uploaded.startswith(b"\x1f\x8b"):
+            with gzip.GzipFile(fileobj=io.BytesIO(uploaded)) as archive:
+                raw = archive.read(limit + 1)
+        else:
+            raw = uploaded
+    except (gzip.BadGzipFile, EOFError, OSError) as exc:
+        raise HTTPException(400, detail=f"The {label.lower()} backup is not valid gzip data") from exc
+    if len(raw) > limit:
+        raise HTTPException(
+            413, detail=f"Uncompressed {label.lower()} backup exceeds the transfer limit"
+        )
+    if not raw:
+        raise HTTPException(400, detail=f"The {label.lower()} backup is empty")
     return raw
 
 
@@ -1167,6 +1207,44 @@ def clear_inventory(db: Annotated[Session, Depends(get_db)]):
     return ClearInventoryResult(deleted=n)
 
 
+@app.get("/api/export/collection")
+def export_collection(db: Annotated[Session, Depends(get_db)]):
+    backup = build_collection_backup(db)
+    raw = backup.model_dump_json().encode("utf-8")
+    compressed = gzip.compress(raw, compresslevel=6)
+    filename = f"spellbinder-collection-{datetime.now(UTC):%Y-%m-%d}.json.gz"
+    _log.info(
+        "Collection exported inventory_lines=%s physical_cards=%s bytes=%s",
+        len(backup.inventory_lines),
+        sum(line.quantity for line in backup.inventory_lines),
+        len(compressed),
+    )
+    return Response(
+        content=compressed,
+        media_type="application/gzip",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.post("/api/import/collection", response_model=CollectionImportResult)
+def import_collection(
+    db: Annotated[Session, Depends(get_db)],
+    file: UploadFile = File(...),
+):
+    raw = _read_portable_backup(file, label="Collection")
+    backup = parse_collection_backup(raw)
+    result = restore_collection_backup(db, backup)
+    _log.info(
+        "Collection imported filename=%r physical_cards=%s unique_cards=%s profiles=%s embeddings=%s",
+        file.filename,
+        result.physical_cards,
+        result.unique_cards,
+        result.mechanic_profiles,
+        result.embeddings,
+    )
+    return result
+
+
 @app.get("/api/import/manabox/progress")
 def get_manabox_progress(import_key: str = Query(default="", max_length=100)):
     return _manabox_import_progress.get(import_key)
@@ -1665,6 +1743,47 @@ def create_deck(body: DeckCreate, db: Annotated[Session, Depends(get_db)]):
     return get_deck(d.id, db)
 
 
+@app.post("/api/decks/import-backup", response_model=DeckDetailOut)
+def import_deck_backup_file(
+    db: Annotated[Session, Depends(get_db)],
+    file: UploadFile = File(...),
+    name: str = Form(..., min_length=1, max_length=200),
+    preserve_positions: bool = Form(True),
+):
+    clean_name = name.strip()
+    if not clean_name:
+        raise HTTPException(422, detail="Deck name is required")
+    if db.query(Deck).filter(func.lower(Deck.name) == clean_name.lower()).first():
+        raise HTTPException(409, detail="A deck with that name already exists")
+    raw = _read_portable_backup(file, label="Deck")
+    backup = parse_deck_backup(raw)
+    deck_id = import_deck_backup(
+        db,
+        backup,
+        name=clean_name,
+        preserve_positions=preserve_positions,
+    )
+    _log.info(
+        "Deck backup imported filename=%r deck_id=%s name=%r cards=%s",
+        file.filename, deck_id, clean_name, len(backup.cards),
+    )
+    return get_deck(deck_id, db)
+
+
+@app.post("/api/decks/preview-backup", response_model=DeckBackupPreview)
+def preview_deck_backup(file: UploadFile = File(...)):
+    backup = parse_deck_backup(_read_portable_backup(file, label="Deck"))
+    return DeckBackupPreview(
+        name=backup.deck.name,
+        format=backup.deck.format,
+        status=backup.deck.status,
+        total_cards=sum(card.quantity for card in backup.cards),
+        grabbed_cards=sum(card.grabbed_quantity for card in backup.cards),
+        proxy_cards=sum(card.proxy_quantity for card in backup.cards),
+        sideboard_cards=sum(card.quantity for card in backup.cards if card.is_sideboard),
+    )
+
+
 @app.post("/api/decks/preview-text")
 def preview_deck_text(
     body: _DeckTextPreviewRequest,
@@ -1693,6 +1812,24 @@ def get_deck(deck_id: int, db: Annotated[Session, Depends(get_db)]):
     if not d:
         raise HTTPException(404, detail="Deck not found")
     return d
+
+
+@app.get("/api/decks/{deck_id}/export")
+def export_deck(deck_id: int, db: Annotated[Session, Depends(get_db)]):
+    backup = build_deck_backup(db, deck_id)
+    raw = backup.model_dump_json().encode("utf-8")
+    compressed = gzip.compress(raw, compresslevel=6)
+    safe_name = re.sub(r"[^a-z0-9]+", "-", backup.deck.name.lower()).strip("-")
+    filename = f"spellbinder-deck-{safe_name or deck_id}.json.gz"
+    _log.info(
+        "Deck exported deck_id=%s cards=%s bytes=%s",
+        deck_id, len(backup.cards), len(compressed),
+    )
+    return Response(
+        content=compressed,
+        media_type="application/gzip",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @app.get("/api/decks/{deck_id}/analysis")

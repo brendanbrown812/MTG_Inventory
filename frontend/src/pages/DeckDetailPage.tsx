@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useBlocker, useParams } from "react-router-dom";
 import {
   deleteDeck,
+  downloadDeckBackup,
   fetchDeck,
   fetchDeckAnalysis,
   previewDeckCsv,
@@ -212,6 +213,7 @@ export default function DeckDetailPage() {
   const [addAsCommander, setAddAsCommander] = useState(false);
   const [commanderId, setCommanderId] = useState("");
   const [busy, setBusy] = useState(false);
+  const [exporting, setExporting] = useState(false);
   const [pickList, setPickList] = useState<CardMatch[] | null>(null);
   const [draftCopies, setDraftCopies] = useState<DraftCopy[]>([]);
   const [draftDirty, setDraftDirty] = useState(false);
@@ -441,6 +443,19 @@ export default function DeckDetailPage() {
     }
   }
 
+  async function exportDeck() {
+    if (!deck || draftDirty) return;
+    setErr(null);
+    setExporting(true);
+    try {
+      await downloadDeckBackup(deck.id, deck.name);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "Deck export failed");
+    } finally {
+      setExporting(false);
+    }
+  }
+
   if (!Number.isFinite(deckId)) {
     return <p className="text-stone-500">Invalid deck.</p>;
   }
@@ -485,6 +500,15 @@ export default function DeckDetailPage() {
           >
             Assemble deck
           </Link>
+          <button
+            type="button"
+            disabled={exporting || draftDirty}
+            onClick={() => void exportDeck()}
+            title={draftDirty ? "Save deck changes before exporting" : "Export this deck"}
+            className="rounded-xl border border-arcane-400/30 bg-arcane-500/10 px-4 py-2 text-sm font-medium text-arcane-200 transition hover:bg-arcane-500/20 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            {exporting ? "Exporting…" : "Export deck"}
+          </button>
           <button
             type="button"
             onClick={() => void onDeleteDeck()}

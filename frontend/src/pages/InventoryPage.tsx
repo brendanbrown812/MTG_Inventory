@@ -5,6 +5,7 @@ import {
   changeInventoryLinePrinting,
   changeInventoryPrinting,
   deleteInventoryLine,
+  downloadCollectionBackup,
   fetchCardLocations,
   fetchCardMatches,
   fetchGroupedInventory,
@@ -93,6 +94,7 @@ export default function InventoryPage() {
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
   const [clearing, setClearing] = useState(false);
+  const [exporting, setExporting] = useState(false);
   const [addCardOpen, setAddCardOpen] = useState(false);
 
   // Filter state
@@ -361,6 +363,18 @@ export default function InventoryPage() {
     }
   }
 
+  async function exportCollection() {
+    setErr(null);
+    setExporting(true);
+    try {
+      await downloadCollectionBackup();
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "Collection export failed");
+    } finally {
+      setExporting(false);
+    }
+  }
+
   const selectedCard = selected?.card;
   const currentPrinting = selected ? selectedPrinting(selected) : undefined;
   const correctionPrinting = selected && printChangeTarget
@@ -385,6 +399,14 @@ export default function InventoryPage() {
             className="rounded-xl border border-emerald-400/30 bg-emerald-500/10 px-4 py-2.5 text-sm font-medium text-emerald-200 transition hover:bg-emerald-500/20"
           >
             Add New Card
+          </button>
+          <button
+            type="button"
+            disabled={exporting}
+            onClick={() => void exportCollection()}
+            className="rounded-xl border border-arcane-400/30 bg-arcane-500/10 px-4 py-2.5 text-sm font-medium text-arcane-200 transition hover:bg-arcane-500/20 disabled:opacity-40"
+          >
+            {exporting ? "Exporting…" : "Export collection"}
           </button>
           <input
             value={q}

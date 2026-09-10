@@ -19,6 +19,7 @@ class Settings(BaseSettings):
 
     max_upload_bytes: int = 10 * 1024 * 1024
     max_request_bytes: int = 12 * 1024 * 1024
+    max_collection_transfer_bytes: int = 100 * 1024 * 1024
     max_deck_text_chars: int = 200_000
     max_ai_text_chars: int = 100_000
     max_scryfall_batch_size: int = 5_000

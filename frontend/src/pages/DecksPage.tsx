@@ -1,6 +1,15 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { createDeck, fetchDecks, importDeckCsvNew, importDeckTextNew, type Deck } from "../api";
+import {
+  createDeck,
+  fetchDecks,
+  importDeckBackup,
+  importDeckCsvNew,
+  importDeckTextNew,
+  previewDeckBackup,
+  type DeckBackupPreview,
+  type Deck,
+} from "../api";
 import { CONSTRUCTED_FORMATS, formatOptionLabel } from "../lib/formats";
 
 type DeckSort = "name" | "commander" | "completed";
@@ -24,6 +33,12 @@ export default function DecksPage() {
 
   const [plainText, setPlainText] = useState("");
   const [plainBusy, setPlainBusy] = useState(false);
+  const [backupFile, setBackupFile] = useState<File | null>(null);
+  const [backupBusy, setBackupBusy] = useState(false);
+  const [backupPreviewBusy, setBackupPreviewBusy] = useState(false);
+  const [backupPreview, setBackupPreview] = useState<DeckBackupPreview | null>(null);
+  const [backupDeckName, setBackupDeckName] = useState("");
+  const [preservePositions, setPreservePositions] = useState(true);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -153,6 +168,49 @@ export default function DecksPage() {
     }
   }
 
+  async function onBackupImport(e: React.FormEvent) {
+    e.preventDefault();
+    if (!backupFile || !backupPreview || !backupDeckName.trim()) return;
+    setBackupBusy(true);
+    setErr(null);
+    try {
+      const deck = await importDeckBackup(
+        backupFile,
+        backupDeckName.trim(),
+        preservePositions,
+      );
+      setBackupFile(null);
+      setBackupPreview(null);
+      setBackupDeckName("");
+      setPreservePositions(true);
+      await load();
+      navigate(`/decks/${deck.id}`);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "Deck backup import failed");
+    } finally {
+      setBackupBusy(false);
+    }
+  }
+
+  async function chooseBackupFile(file: File | null) {
+    setBackupFile(file);
+    setBackupPreview(null);
+    setBackupDeckName("");
+    setPreservePositions(true);
+    setErr(null);
+    if (!file) return;
+    setBackupPreviewBusy(true);
+    try {
+      const preview = await previewDeckBackup(file);
+      setBackupPreview(preview);
+      setBackupDeckName(preview.name);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "Could not read the deck backup");
+    } finally {
+      setBackupPreviewBusy(false);
+    }
+  }
+
   return (
     <div className="space-y-8">
       <div>
@@ -167,7 +225,7 @@ export default function DecksPage() {
         <summary className="flex cursor-pointer list-none items-center justify-between gap-4 px-6 py-5 text-stone-200 marker:hidden">
           <div>
             <h2 className="font-display text-xl">Create or import a deck</h2>
-            <p className="mt-1 text-sm text-stone-500">Start empty, upload a CSV, or paste a plaintext list.</p>
+            <p className="mt-1 text-sm text-stone-500">Start empty, restore a Spellbinder deck, upload a CSV, or paste a plaintext list.</p>
           </div>
           <span className="text-lg text-stone-500 transition-transform group-open:rotate-180" aria-hidden="true">⌄</span>
         </summary>
@@ -219,6 +277,73 @@ export default function DecksPage() {
           {creating ? "…" : "Create"}
         </button>
       </form>
+
+      <div className="rounded-2xl border border-arcane-400/20 bg-arcane-500/5 p-6 shadow-card">
+        <h2 className="font-display text-xl text-stone-100">Restore a Spellbinder deck</h2>
+        <p className="mt-2 max-w-3xl text-sm text-stone-400">
+          Import a deck backup with its commander, settings, sideboard, assembly statuses, proxies, exact prints,
+          and cached card knowledge. A new deck is created; your collection quantities are not changed.
+        </p>
+        <form onSubmit={(event) => void onBackupImport(event)} className="mt-5 flex flex-wrap items-center gap-4">
+          <label className="cursor-pointer rounded-xl border border-dashed border-arcane-400/30 bg-ink-950/40 px-4 py-3 text-sm text-stone-300 transition hover:bg-ink-900/70">
+            <input
+              type="file"
+              accept=".json,.gz,.json.gz,application/json,application/gzip"
+              className="hidden"
+              onChange={(event) => void chooseBackupFile(event.target.files?.[0] ?? null)}
+            />
+            {backupPreviewBusy ? "Reading backup…" : backupFile?.name ?? "Choose deck backup…"}
+          </label>
+          {backupPreview && (
+            <div className="w-full space-y-4 rounded-xl border border-white/10 bg-ink-950/35 p-4">
+              <div className="grid gap-4 md:grid-cols-[minmax(240px,1fr)_minmax(260px,1fr)]">
+                <label className="text-xs uppercase tracking-wider text-stone-500">
+                  New deck name
+                  <input
+                    value={backupDeckName}
+                    onChange={(event) => setBackupDeckName(event.target.value)}
+                    maxLength={200}
+                    autoFocus
+                    className="mt-1 block w-full rounded-xl border border-white/10 bg-ink-950/60 px-4 py-2.5 text-sm normal-case tracking-normal text-stone-100 outline-none focus:ring-2 focus:ring-arcane-400/40"
+                  />
+                </label>
+                <label className="flex cursor-pointer items-start gap-3 rounded-xl border border-white/10 bg-white/[0.03] p-3 text-sm text-stone-300">
+                  <input
+                    type="checkbox"
+                    checked={preservePositions}
+                    onChange={(event) => setPreservePositions(event.target.checked)}
+                    className="mt-0.5 rounded border-white/20 bg-ink-950"
+                  />
+                  <span>
+                    <span className="block font-medium text-stone-200">Keep assembly positions</span>
+                    <span className="mt-1 block text-xs text-stone-500">
+                      Preserve grabbed and proxy cards. Turn this off to return every card to Still to grab.
+                    </span>
+                  </span>
+                </label>
+              </div>
+              <p className="text-xs text-stone-500">
+                {backupPreview.total_cards} cards · {backupPreview.grabbed_cards} grabbed ·{" "}
+                {backupPreview.proxy_cards} proxied · {backupPreview.sideboard_cards} sideboard
+              </p>
+              {decks.some((deck) => deck.name.trim().toLowerCase() === backupDeckName.trim().toLowerCase()) && (
+                <p className="text-xs text-amber-300">A deck with this name already exists. Choose a different name.</p>
+              )}
+              <button
+                type="submit"
+                disabled={
+                  backupBusy
+                  || !backupDeckName.trim()
+                  || decks.some((deck) => deck.name.trim().toLowerCase() === backupDeckName.trim().toLowerCase())
+                }
+                className="rounded-xl bg-arcane-500/20 px-5 py-2.5 text-sm font-medium text-arcane-100 ring-1 ring-arcane-400/30 disabled:opacity-40"
+              >
+                {backupBusy ? "Restoring…" : "Restore deck"}
+              </button>
+            </div>
+          )}
+        </form>
+      </div>
 
       <div className="rounded-2xl border border-white/10 bg-ink-900/40 p-6 shadow-card">
         <h2 className="font-display text-xl text-stone-100">Create deck from CSV</h2>
