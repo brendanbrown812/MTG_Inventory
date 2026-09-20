@@ -43,13 +43,14 @@ def test_health_and_empty_status(client: TestClient) -> None:
 
 
 def test_api_key_protects_private_routes(client: TestClient) -> None:
+    settings.auth_mode = "auto"
     settings.app_api_key = "test-secret"
 
     assert client.get("/api/health").status_code == 200
-    assert client.get("/api/auth/status").json() == {
-        "required": True,
-        "authenticated": False,
-    }
+    auth_status = client.get("/api/auth/status").json()
+    assert auth_status["mode"] == "api_key"
+    assert auth_status["required"] is True
+    assert auth_status["authenticated"] is False
     assert client.get("/api/inventory").status_code == 401
     assert client.get(
         "/api/inventory",

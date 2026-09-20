@@ -1,37 +1,66 @@
-# Spellbinder deployment security
+# Spellbinder authentication and deployment security
 
-Spellbinder changes personal collection data and can make paid AI requests. CORS is not authentication. Set `REQUIRE_AUTH=true` for every LAN, tunnel, or public deployment; the backend then refuses to start unless one of the protections below is explicitly configured. Docker Compose enables this requirement by default.
+Spellbinder changes personal collection data and can make paid AI requests. CORS is not authentication. Docker deployments use Spellbinder's native session login by default.
 
-## Option 1: Spellbinder API key
+## Native administrator login (recommended)
 
-Generate a long random value and place it in the ignored project-root `.env` file:
+Set these values in the ignored project-root `.env` file:
 
 ```dotenv
-APP_API_KEY=replace-with-a-long-random-value
+AUTH_MODE=session
 REQUIRE_AUTH=true
-EXTERNAL_AUTH_ENABLED=false
+SESSION_COOKIE_SECURE=true
 ```
 
-When an API key is configured, the frontend shows an unlock screen. The key is retained only in that browser tab's session storage and is sent as `X-Spellbinder-Key` on API requests. Closing the tab clears it.
+Use `SESSION_COOKIE_SECURE=true` when the browser reaches Spellbinder through an HTTPS address, including a Cloudflare Tunnel domain. Use `false` only for direct HTTP access such as `http://localhost:8888`; a browser will not send a Secure cookie over plain HTTP.
 
-Do not commit or paste the real key into `.env.example`, screenshots, logs, or support messages.
+Create the first administrator after the containers are running:
 
-## Option 2: Cloudflare Access or another authenticating proxy
+```console
+docker compose exec backend python -m app.auth_cli create-user brend --admin
+```
 
-A Cloudflare Tunnel by itself is not authentication. Configure an Access application and policy that blocks unauthenticated requests before they reach Spellbinder, then set:
+For manual backend development, run the equivalent command from the `backend` folder:
+
+```console
+python -m app.auth_cli create-user brend --admin
+```
+
+The command prompts for the password without echoing it. Passwords are stored as Argon2id hashes. Browser sessions use opaque, server-side session records; the raw token is stored only in an HttpOnly/SameSite cookie (and Secure when configured). Write requests additionally require a session-bound CSRF token.
+
+Useful account commands:
+
+```console
+python -m app.auth_cli list-users
+python -m app.auth_cli reset-password brend
+```
+
+Resetting a password revokes that user's existing sessions. There is intentionally no public registration route. The schema includes a role field so read-only viewer accounts can be introduced later, but this release accepts administrators only.
+
+## Legacy API-key mode
+
+Scripts or older deployments can explicitly retain the shared-key flow:
 
 ```dotenv
-APP_API_KEY=
-REQUIRE_AUTH=true
+AUTH_MODE=api_key
+APP_API_KEY=replace-with-a-long-random-value
+```
+
+The frontend retains an API-key unlock screen for this compatibility mode. The key is held in the browser tab's session storage and sent as `X-Spellbinder-Key`.
+
+## External authentication
+
+A Cloudflare Tunnel by itself is not authentication. If an upstream service such as Cloudflare Access blocks unauthenticated traffic before it reaches Spellbinder, use:
+
+```dotenv
+AUTH_MODE=external
 EXTERNAL_AUTH_ENABLED=true
 ```
 
-Only set `EXTERNAL_AUTH_ENABLED=true` when the upstream proxy actually enforces authentication. This flag is an explicit acknowledgement; Spellbinder cannot verify the proxy policy itself.
-
 ## Local-only use
 
-The manual backend and Vite development server bind to `127.0.0.1`, so `REQUIRE_AUTH` may remain false and existing local behavior is unchanged. A stale remote CORS origin produces a warning but does not block that local process. Docker sets `REQUIRE_AUTH=true` by default because its published port can be reached beyond loopback unless the host firewall prevents it.
+The manual backend and Vite development server bind to `127.0.0.1`. With `AUTH_MODE=auto`, no API key, and `REQUIRE_AUTH=false`, authentication remains disabled for that local workflow. To test native login locally, set `AUTH_MODE=session` and `SESSION_COOKIE_SECURE=false` before starting the backend.
 
 ## Public endpoints
 
-`/api/health` and `/api/auth/status` remain public so container health checks and the unlock screen work. All other `/api/` routes require the configured API key unless authentication is disabled or delegated upstream.
+`/api/health`, `/api/auth/status`, and `/api/auth/login` are public so health checks and sign-in work. Login responses use generic errors and repeated failed attempts are throttled. All other `/api/` routes require the configured authentication mode. In session mode, mutations require the CSRF token returned after login.

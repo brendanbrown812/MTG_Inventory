@@ -1,6 +1,13 @@
 import { useEffect, useState } from "react";
 import { Link, NavLink, Route, Routes } from "react-router-dom";
-import { clearApiKey, fetchAuthStatus, setApiKey } from "./api";
+import {
+  clearApiKey,
+  fetchAuthStatus,
+  login,
+  logout,
+  setApiKey,
+  type AuthStatus,
+} from "./api";
 import DeckDetailPage from "./pages/DeckDetailPage";
 import DeckAssemblyPage from "./pages/DeckAssemblyPage";
 import DeckbuildingPage from "./pages/DeckbuildingPage";
@@ -18,7 +25,7 @@ const nav = [
   { to: "/enrichment", label: "Enrich" },
 ];
 
-function AppShell() {
+function AppShell({ status, onLogout }: { status: AuthStatus; onLogout: () => void }) {
   return (
     <div className="min-h-screen bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-ink-800 via-ink-950 to-ink-950">
       <header className="sticky top-0 z-40 border-b border-white/5 bg-ink-950/80 backdrop-blur-md">
@@ -34,25 +41,39 @@ function AppShell() {
               inventory & decks
             </span>
           </Link>
-          <nav className="flex items-center gap-1 rounded-full border border-white/10 bg-ink-900/60 p-1 shadow-card">
-            {nav.map((item) => (
-              <NavLink
-                key={item.to}
-                to={item.to}
-                end={item.to === "/"}
-                className={({ isActive }) =>
-                  [
-                    "rounded-full px-4 py-2 text-sm font-medium transition",
-                    isActive
-                      ? "bg-gradient-to-r from-ember-500/20 to-arcane-500/20 text-stone-100 ring-1 ring-ember-400/30"
-                      : "text-stone-400 hover:text-stone-200",
-                  ].join(" ")
-                }
-              >
-                {item.label}
-              </NavLink>
-            ))}
-          </nav>
+          <div className="flex items-center gap-3">
+            <nav className="flex items-center gap-1 rounded-full border border-white/10 bg-ink-900/60 p-1 shadow-card">
+              {nav.map((item) => (
+                <NavLink
+                  key={item.to}
+                  to={item.to}
+                  end={item.to === "/"}
+                  className={({ isActive }) =>
+                    [
+                      "rounded-full px-4 py-2 text-sm font-medium transition",
+                      isActive
+                        ? "bg-gradient-to-r from-ember-500/20 to-arcane-500/20 text-stone-100 ring-1 ring-ember-400/30"
+                        : "text-stone-400 hover:text-stone-200",
+                    ].join(" ")
+                  }
+                >
+                  {item.label}
+                </NavLink>
+              ))}
+            </nav>
+            {status.user && (
+              <div className="flex items-center gap-2 text-xs text-stone-400">
+                <span className="hidden xl:inline">{status.user.username}</span>
+                <button
+                  type="button"
+                  onClick={onLogout}
+                  className="rounded-lg border border-white/10 px-3 py-2 hover:border-white/20 hover:text-stone-200"
+                >
+                  Sign out
+                </button>
+              </div>
+            )}
+          </div>
         </div>
       </header>
       <main className="w-full px-4 py-8 sm:px-6 sm:py-10 lg:px-8 2xl:px-10">
@@ -76,17 +97,22 @@ function AppShell() {
 export default function App() {
   const [checking, setChecking] = useState(true);
   const [authenticated, setAuthenticated] = useState(false);
+  const [status, setStatus] = useState<AuthStatus | null>(null);
   const [apiReachable, setApiReachable] = useState(true);
   const [key, setKey] = useState("");
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [remember, setRemember] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   async function checkAuthentication() {
     setChecking(true);
     try {
       const status = await fetchAuthStatus();
+      setStatus(status);
       setApiReachable(true);
       setAuthenticated(status.authenticated);
-      setError(status.authenticated ? null : "Enter the API key configured for this Spellbinder server.");
+      setError(null);
     } catch {
       setApiReachable(false);
       setAuthenticated(false);
@@ -98,12 +124,39 @@ export default function App() {
 
   useEffect(() => {
     void checkAuthentication();
+    const handleUnauthorized = () => {
+      setAuthenticated(false);
+      setError("Your session ended. Sign in again.");
+    };
+    window.addEventListener("spellbinder:unauthorized", handleUnauthorized);
+    return () => window.removeEventListener("spellbinder:unauthorized", handleUnauthorized);
   }, []);
 
   async function submitKey(e: React.FormEvent) {
     e.preventDefault();
     setApiKey(key);
     await checkAuthentication();
+  }
+
+  async function submitLogin(e: React.FormEvent) {
+    e.preventDefault();
+    setError(null);
+    try {
+      await login(username, password, remember);
+      setPassword("");
+      await checkAuthentication();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not sign in");
+    }
+  }
+
+  async function signOut() {
+    try {
+      await logout();
+    } finally {
+      setAuthenticated(false);
+      setStatus((current) => current ? { ...current, authenticated: false, user: null, csrf_token: null } : current);
+    }
   }
 
   if (checking) {
@@ -133,6 +186,47 @@ export default function App() {
               Retry connection
             </button>
           </div>
+        </div>
+      );
+    }
+
+    if (status?.setup_required) {
+      return (
+        <div className="flex min-h-screen items-center justify-center bg-ink-950 px-4">
+          <div className="w-full max-w-lg rounded-2xl border border-white/10 bg-ink-900/70 p-6 shadow-card">
+            <h1 className="font-display text-3xl font-semibold text-stone-100">Create your administrator</h1>
+            <p className="mt-3 text-sm leading-6 text-stone-400">
+              No Spellbinder account exists yet. Open a terminal in the backend folder and run:
+            </p>
+            <code className="mt-4 block overflow-x-auto rounded-xl bg-ink-950/80 p-4 text-sm text-ember-200">
+              python -m app.auth_cli create-user brend --admin
+            </code>
+            <p className="mt-3 text-xs text-stone-500">Replace “brend” with the username you want, then refresh this page.</p>
+            <button type="button" onClick={() => void checkAuthentication()} className="mt-5 w-full rounded-xl bg-ember-500/25 px-4 py-2 font-medium text-ember-100 ring-1 ring-ember-400/30">
+              I created the account — refresh
+            </button>
+          </div>
+        </div>
+      );
+    }
+
+    if (status?.mode === "session") {
+      return (
+        <div className="flex min-h-screen items-center justify-center bg-ink-950 px-4">
+          <form onSubmit={(e) => void submitLogin(e)} className="w-full max-w-sm rounded-2xl border border-white/10 bg-ink-900/70 p-6 shadow-card">
+            <h1 className="font-display text-3xl font-semibold text-stone-100">Spellbinder</h1>
+            <p className="mt-2 text-sm text-stone-400">Sign in to manage your collection.</p>
+            <label className="mt-5 block text-xs font-medium uppercase tracking-wide text-stone-500">Username</label>
+            <input value={username} onChange={(e) => setUsername(e.target.value)} autoComplete="username" autoFocus className="mt-2 w-full rounded-xl border border-white/10 bg-ink-950/70 px-3 py-2 text-stone-100 outline-none focus:ring-2 focus:ring-ember-400/40" />
+            <label className="mt-4 block text-xs font-medium uppercase tracking-wide text-stone-500">Password</label>
+            <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="current-password" className="mt-2 w-full rounded-xl border border-white/10 bg-ink-950/70 px-3 py-2 text-stone-100 outline-none focus:ring-2 focus:ring-ember-400/40" />
+            <label className="mt-4 flex items-center gap-2 text-sm text-stone-400">
+              <input type="checkbox" checked={remember} onChange={(e) => setRemember(e.target.checked)} className="accent-orange-500" />
+              Keep me signed in for 30 days
+            </label>
+            {error && <p className="mt-3 text-xs text-red-300">{error}</p>}
+            <button type="submit" disabled={!username.trim() || !password} className="mt-5 w-full rounded-xl bg-ember-500/25 px-4 py-2 font-medium text-ember-100 ring-1 ring-ember-400/30 disabled:opacity-40">Sign in</button>
+          </form>
         </div>
       );
     }
@@ -178,5 +272,5 @@ export default function App() {
     );
   }
 
-  return <AppShell />;
+  return <AppShell status={status!} onLogout={() => void signOut()} />;
 }

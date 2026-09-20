@@ -168,6 +168,9 @@ def test_legacy_migration_separates_oracle_printings_and_preserves_data(tmp_path
             "SELECT COUNT(*) FROM schema_versions WHERE version=12"
         )).scalar_one() == 1
         assert conn.execute(text(
+            "SELECT COUNT(*) FROM schema_versions WHERE version=13"
+        )).scalar_one() == 1
+        assert conn.execute(text(
             "SELECT COUNT(*) FROM sqlite_master "
             "WHERE type='table' AND name='deck_inventory_additions'"
         )).scalar_one() == 1

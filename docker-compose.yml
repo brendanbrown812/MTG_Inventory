@@ -9,6 +9,8 @@ services:
       # Include your Cloudflare Tunnel domain when you have one, e.g.:
       #   CORS_ORIGINS=https://spellbinder.yourdomain.com
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:8888}
+      AUTH_MODE: ${AUTH_MODE:-session}
+      SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-false}
       APP_API_KEY: ${APP_API_KEY:-}
       REQUIRE_AUTH: ${REQUIRE_AUTH:-true}
       EXTERNAL_AUTH_ENABLED: ${EXTERNAL_AUTH_ENABLED:-false}

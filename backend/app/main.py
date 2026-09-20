@@ -23,8 +23,9 @@ from app.config import settings
 from app.database import Base, SessionLocal, engine, get_db, run_migrations
 from app.logging_setup import configure_logging, get_logger
 from app.models import (
-    CardPrinting, Deck, DeckCard, DeckCardAllocation, DeckInventoryAddition,
+    AuthSession, CardPrinting, Deck, DeckCard, DeckCardAllocation, DeckInventoryAddition,
     EnrichmentStats, InventoryLine, MechanicProfileRecord, OracleCard, RecommendationRun,
+    User,
 )
 from app.embeddings.registry import build_embedding_provider, embedding_provider_is_configured
 from app.evaluation.runner import run_local_quality_evaluation
@@ -110,7 +111,14 @@ from app.services.recommendation_history import (
     record_recommendation_feedback,
 )
 from app.services.openai_usage import openai_usage_summary
-from app.security import api_key_is_valid, has_unprotected_remote_origin, validate_auth_configuration
+from app.auth_service import (
+    cookie_name, create_session, csrf_is_valid, find_session, normalize_username,
+    session_cookie, token_hash, utcnow, verify_password,
+)
+from app.security import (
+    api_key_is_valid, has_unprotected_remote_origin, resolved_auth_mode,
+    validate_auth_configuration,
+)
 from app.services.scryfall_client import (
     ScryfallClient,
     bulk_ensure_cards_cached,
@@ -148,11 +156,14 @@ app.add_middleware(
 )
 
 
-_PUBLIC_API_PATHS = {"/api/health", "/api/auth/status"}
+_PUBLIC_API_PATHS = {"/api/health", "/api/auth/status", "/api/auth/login"}
+_MUTATING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+_login_attempts: dict[str, list[float]] = {}
+_login_attempts_lock = threading.Lock()
 
 
 @app.middleware("http")
-async def require_api_key(request: Request, call_next):
+async def require_authentication(request: Request, call_next):
     content_length = request.headers.get("Content-Length")
     if content_length:
         try:
@@ -169,12 +180,30 @@ async def require_api_key(request: Request, call_next):
                 return JSONResponse(status_code=413, content={"detail": "Request body is too large"})
         except ValueError:
             return JSONResponse(status_code=400, content={"detail": "Invalid Content-Length header"})
-    if (
-        request.url.path.startswith("/api/")
-        and request.url.path not in _PUBLIC_API_PATHS
-        and not api_key_is_valid(request.headers.get("X-Spellbinder-Key"))
-    ):
-        return JSONResponse(status_code=401, content={"detail": "Invalid or missing Spellbinder API key"})
+    if request.url.path.startswith("/api/") and request.url.path not in _PUBLIC_API_PATHS:
+        mode = resolved_auth_mode()
+        if mode == "api_key":
+            if not api_key_is_valid(request.headers.get("X-Spellbinder-Key")):
+                return JSONResponse(
+                    status_code=401,
+                    content={"detail": "Invalid or missing Spellbinder API key"},
+                )
+        elif mode == "session":
+            with SessionLocal() as db:
+                auth_session = find_session(db, session_cookie(request.cookies))
+                if auth_session is None:
+                    return JSONResponse(status_code=401, content={"detail": "Sign in required"})
+                if auth_session.user.role != "admin":
+                    return JSONResponse(status_code=403, content={"detail": "Administrator access required"})
+                if (
+                    request.method in _MUTATING_METHODS
+                    and not csrf_is_valid(auth_session, request.headers.get("X-CSRF-Token"))
+                ):
+                    return JSONResponse(status_code=403, content={"detail": "Invalid CSRF token"})
+                request.state.user_id = auth_session.user.id
+                request.state.username = auth_session.user.username
+                auth_session.last_seen_at = utcnow()
+                db.commit()
     return await call_next(request)
 
 
@@ -780,11 +809,95 @@ def health():
 
 @app.get("/api/auth/status")
 def auth_status(request: Request):
-    required = bool(settings.app_api_key)
+    mode = resolved_auth_mode()
+    if mode == "api_key":
+        return {
+            "mode": mode, "required": True,
+            "authenticated": api_key_is_valid(request.headers.get("X-Spellbinder-Key")),
+            "setup_required": False, "user": None, "csrf_token": None,
+        }
+    if mode == "session":
+        with SessionLocal() as db:
+            setup_required = db.query(User.id).first() is None
+            auth_session = find_session(db, session_cookie(request.cookies))
+            return {
+                "mode": mode, "required": True,
+                "authenticated": auth_session is not None,
+                "setup_required": setup_required,
+                "user": (
+                    {"username": auth_session.user.username, "role": auth_session.user.role}
+                    if auth_session else None
+                ),
+                "csrf_token": auth_session.csrf_token if auth_session else None,
+            }
     return {
-        "required": required,
-        "authenticated": not required or api_key_is_valid(request.headers.get("X-Spellbinder-Key")),
+        "mode": mode, "required": False, "authenticated": True,
+        "setup_required": False, "user": None, "csrf_token": None,
     }
+
+
+class _LoginRequest(BaseModel):
+    username: str = Field(min_length=1, max_length=64)
+    password: str = Field(min_length=1, max_length=1024)
+    remember: bool = True
+
+
+@app.post("/api/auth/login")
+def login(body: _LoginRequest, request: Request):
+    if resolved_auth_mode() != "session":
+        raise HTTPException(404, detail="Native login is not enabled")
+    try:
+        username = normalize_username(body.username)
+    except ValueError:
+        username = body.username.strip().lower()[:64]
+    client = request.client.host if request.client else "unknown"
+    rate_key = f"{client}:{username}"
+    now = time.monotonic()
+    with _login_attempts_lock:
+        recent = [attempt for attempt in _login_attempts.get(rate_key, []) if now - attempt < 300]
+        _login_attempts[rate_key] = recent
+        if len(recent) >= 5:
+            raise HTTPException(429, detail="Too many login attempts. Try again in a few minutes.")
+
+    with SessionLocal() as db:
+        user = db.query(User).filter(User.username == username).first()
+        valid = verify_password(user.password_hash if user else None, body.password)
+        if not valid or user is None or not user.is_active or user.role != "admin":
+            with _login_attempts_lock:
+                _login_attempts.setdefault(rate_key, []).append(now)
+            raise HTTPException(401, detail="Invalid username or password")
+        new_session = create_session(db, user, remember=body.remember)
+        db.commit()
+        response_user = {"username": user.username, "role": user.role}
+        with _login_attempts_lock:
+            _login_attempts.pop(rate_key, None)
+
+    response = JSONResponse({
+        "authenticated": True,
+        "user": response_user,
+        "csrf_token": new_session.csrf_token,
+    })
+    max_age = max(0, int((new_session.expires_at - utcnow()).total_seconds()))
+    response.set_cookie(
+        cookie_name(), new_session.token, max_age=max_age, httponly=True,
+        secure=settings.session_cookie_secure, samesite="strict", path="/",
+    )
+    return response
+
+
+@app.post("/api/auth/logout")
+def logout(request: Request):
+    raw_token = session_cookie(request.cookies)
+    if raw_token:
+        with SessionLocal() as db:
+            db.query(AuthSession).filter(AuthSession.token_hash == token_hash(raw_token)).delete()
+            db.commit()
+    response = JSONResponse({"authenticated": False})
+    for name in {"spellbinder_session", "__Host-spellbinder_session"}:
+        response.delete_cookie(
+            name, path="/", secure=name.startswith("__Host-"), samesite="strict"
+        )
+    return response
 
 
 @app.get("/api/inventory", response_model=list[InventoryLineOut])

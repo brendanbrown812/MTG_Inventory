@@ -16,6 +16,12 @@ class Settings(BaseSettings):
     # Set only when an upstream service such as Cloudflare Access performs
     # authentication before traffic reaches Spellbinder.
     external_auth_enabled: bool = False
+    # auto preserves older installations: an API key wins, followed by an
+    # external proxy; REQUIRE_AUTH=true otherwise selects native sessions.
+    auth_mode: str = "auto"
+    session_cookie_secure: bool = False
+    session_hours: int = 24
+    remembered_session_days: int = 30
 
     max_upload_bytes: int = 10 * 1024 * 1024
     max_request_bytes: int = 12 * 1024 * 1024

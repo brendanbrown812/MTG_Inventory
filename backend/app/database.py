@@ -614,3 +614,26 @@ def run_migrations(eng) -> None:
                 )
             conn.execute(text("INSERT INTO schema_versions (version) VALUES (12)"))
             conn.commit()
+
+        if 13 not in applied:
+            for table_name, required in {
+                "users": {"id", "username", "password_hash", "role", "is_active"},
+                "auth_sessions": {
+                    "token_hash", "user_id", "csrf_token", "created_at", "expires_at"
+                },
+            }.items():
+                if not _table_exists(conn, table_name):
+                    raise RuntimeError(f"Migration 13 requires the {table_name} table")
+                columns = {
+                    row[1] for row in conn.exec_driver_sql(
+                        f"PRAGMA table_info('{table_name}')"
+                    ).fetchall()
+                }
+                missing = required - columns
+                if missing:
+                    raise RuntimeError(
+                        f"Migration 13 authentication validation failed for {table_name}: "
+                        f"missing_columns={sorted(missing)}"
+                    )
+            conn.execute(text("INSERT INTO schema_versions (version) VALUES (13)"))
+            conn.commit()

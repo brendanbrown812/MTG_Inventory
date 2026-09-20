@@ -2,6 +2,7 @@ const base = (import.meta.env.VITE_API_BASE ?? "").replace(/\/$/, "");
 
 const API_KEY_STORAGE = "spellbinder_api_key";
 const browserFetch = globalThis.fetch.bind(globalThis);
+let csrfToken: string | null = null;
 
 export function setApiKey(value: string): void {
   const key = value.trim();
@@ -17,15 +18,59 @@ async function fetch(input: RequestInfo | URL, init: RequestInit = {}): Promise<
   const headers = new Headers(init.headers);
   const apiKey = sessionStorage.getItem(API_KEY_STORAGE);
   if (apiKey) headers.set("X-Spellbinder-Key", apiKey);
-  return browserFetch(input, { ...init, headers });
+  const method = (init.method ?? "GET").toUpperCase();
+  if (csrfToken && ["POST", "PUT", "PATCH", "DELETE"].includes(method)) {
+    headers.set("X-CSRF-Token", csrfToken);
+  }
+  const response = await browserFetch(input, { ...init, headers, credentials: "include" });
+  if (response.status === 401) window.dispatchEvent(new Event("spellbinder:unauthorized"));
+  return response;
 }
 
-export type AuthStatus = { required: boolean; authenticated: boolean };
+export type AuthUser = { username: string; role: "admin" | "viewer" };
+export type AuthStatus = {
+  mode: "disabled" | "session" | "api_key" | "external";
+  required: boolean;
+  authenticated: boolean;
+  setup_required: boolean;
+  user: AuthUser | null;
+  csrf_token: string | null;
+};
 
 export async function fetchAuthStatus(): Promise<AuthStatus> {
   const r = await fetch(`${base}/api/auth/status`);
   if (!r.ok) throw new Error(await r.text());
-  return r.json();
+  const status = await r.json() as AuthStatus;
+  csrfToken = status.csrf_token;
+  return status;
+}
+
+export async function login(
+  username: string,
+  password: string,
+  remember: boolean,
+): Promise<{ authenticated: true; user: AuthUser; csrf_token: string }> {
+  const r = await fetch(`${base}/api/auth/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username, password, remember }),
+  });
+  const payload = await r.json().catch(() => null) as {
+    detail?: string;
+    authenticated?: true;
+    user?: AuthUser;
+    csrf_token?: string;
+  } | null;
+  if (!r.ok) throw new Error(payload?.detail ?? "Could not sign in");
+  csrfToken = payload?.csrf_token ?? null;
+  return payload as { authenticated: true; user: AuthUser; csrf_token: string };
+}
+
+export async function logout(): Promise<void> {
+  const r = await fetch(`${base}/api/auth/logout`, { method: "POST" });
+  if (!r.ok && r.status !== 401) throw new Error(await r.text());
+  csrfToken = null;
+  clearApiKey();
 }
 
 export type Card = {

@@ -57,6 +57,15 @@ FIRST-TIME SETUP
 
        python -m pip install -r requirements.txt
 
+     For a Docker/home-server deployment, start the containers and create the
+     initial administrator (replace "brend" with your preferred username):
+
+       docker compose up -d
+       docker compose exec backend python -m app.auth_cli create-user brend --admin
+
+     Spellbinder securely prompts for the password. See docs\SECURITY.md for
+     HTTPS cookie and legacy authentication options.
+
   2) Frontend dependencies (from the "frontend" folder):
 
        npm install

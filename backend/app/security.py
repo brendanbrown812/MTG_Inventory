@@ -6,6 +6,24 @@ from urllib.parse import urlparse
 from app.config import settings
 
 
+AUTH_MODES = {"auto", "disabled", "session", "api_key", "external"}
+
+
+def resolved_auth_mode() -> str:
+    mode = settings.auth_mode.strip().lower()
+    if mode not in AUTH_MODES:
+        raise RuntimeError(f"Invalid AUTH_MODE {settings.auth_mode!r}")
+    if mode != "auto":
+        return mode
+    if settings.app_api_key:
+        return "api_key"
+    if settings.external_auth_enabled:
+        return "external"
+    if settings.require_auth:
+        return "session"
+    return "disabled"
+
+
 def api_key_is_valid(provided: str | None) -> bool:
     if not settings.app_api_key:
         return True
@@ -25,18 +43,14 @@ def has_remote_cors_origin() -> bool:
 
 
 def validate_auth_configuration() -> None:
-    if settings.require_auth and not settings.app_api_key and not settings.external_auth_enabled:
+    mode = resolved_auth_mode()
+    if mode == "api_key" and not settings.app_api_key:
         raise RuntimeError(
-            "Refusing to start because authentication is required but not configured. "
-            "Set APP_API_KEY, or set EXTERNAL_AUTH_ENABLED=true only when an upstream "
-            "service such as Cloudflare Access protects the application."
+            "AUTH_MODE=api_key requires APP_API_KEY."
         )
+    if mode == "external" and not settings.external_auth_enabled:
+        raise RuntimeError("AUTH_MODE=external requires EXTERNAL_AUTH_ENABLED=true.")
 
 
 def has_unprotected_remote_origin() -> bool:
-    return (
-        has_remote_cors_origin()
-        and not settings.require_auth
-        and not settings.app_api_key
-        and not settings.external_auth_enabled
-    )
+    return has_remote_cors_origin() and resolved_auth_mode() == "disabled"
