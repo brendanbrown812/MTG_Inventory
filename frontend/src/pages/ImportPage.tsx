@@ -9,6 +9,7 @@ import {
   type ImportRowResult,
   type ManaboxProgress,
 } from "../api";
+import { randomUuid } from "../lib/uuid";
 
 export default function ImportPage() {
   const [file, setFile] = useState<File | null>(null);
@@ -49,7 +50,7 @@ export default function ImportPage() {
     setResult(null);
     setProgress(null);
 
-    const importKey = crypto.randomUUID();
+    const importKey = randomUuid();
     const pollId = setInterval(() => {
       void fetchManaboxImportProgress(importKey).then((p) => {
         if (p) setProgress(p);

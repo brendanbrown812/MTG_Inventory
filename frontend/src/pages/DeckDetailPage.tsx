@@ -19,6 +19,7 @@ import {
 import { CardHoverPreview } from "../components/CardHoverPreview";
 import { DeckPrintingModal } from "../components/DeckPrintingModal";
 import { CONSTRUCTED_FORMATS, formatOptionLabel } from "../lib/formats";
+import { randomUuid } from "../lib/uuid";
 
 function AnalysisPanel({ analysis, loading }: { analysis: DeckAnalysis | null; loading: boolean }) {
   if (!analysis) {
@@ -847,7 +848,7 @@ export default function DeckDetailPage() {
                 isCommander: false,
                 isSideboard: false,
                 addToCollection: true,
-                collectionAdditionId: crypto.randomUUID(),
+                collectionAdditionId: randomUuid(),
               })),
             ]);
             setDraftDirty(true);
