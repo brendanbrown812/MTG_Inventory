@@ -86,7 +86,7 @@ export function DeckPrintingModal({
   onSaved,
   onDraftSaved,
   onDraftCommanderSelected,
-  onDraftCardAdded,
+  onDraftPrintingAdded,
   allowCommanderSelection = false,
   currentCommanderName = null,
 }: {
@@ -97,7 +97,7 @@ export function DeckPrintingModal({
   onSaved?: (deck: DeckDetail) => void;
   onDraftSaved?: (deckCard: DeckCard) => void;
   onDraftCommanderSelected?: () => void;
-  onDraftCardAdded?: (card: NonNullable<DeckCard["card"]>, quantity: number, foil: boolean) => void;
+  onDraftPrintingAdded?: (card: NonNullable<DeckCard["card"]>, foil: boolean) => void;
   allowCommanderSelection?: boolean;
   currentCommanderName?: string | null;
 }) {
@@ -280,31 +280,33 @@ export function DeckPrintingModal({
                   {commanderSaving ? "Selecting…" : "Make commander"}
                 </button>
               ) : null}
-              {onDraftCardAdded && (
+              {onDraftPrintingAdded && (
                 <button
                   type="button"
                   onClick={() => setAddPrintingOpen(true)}
                   className="mt-3 rounded-lg border border-emerald-400/25 px-3 py-1.5 text-xs font-medium text-emerald-200 transition hover:bg-emerald-500/15"
                 >
-                  Add new card
+                  Use another printing
                 </button>
               )}
             </div>
             <button type="button" onClick={onClose} className="rounded-lg px-2 py-1 text-stone-500 hover:bg-white/5 hover:text-stone-200" aria-label="Close">✕</button>
           </div>
 
-          {addPrintingOpen && onDraftCardAdded && (
+          {addPrintingOpen && onDraftPrintingAdded && (
             <div className="mt-5">
               <AddCardPrintingPicker
                 sourceScryfallId={deckCard.scryfall_id}
-                title={`Add another ${cardName}`}
-                description="Choose the exact new physical copy. It will be added to this deck draft and your collection together when you save the deck."
+                title={`Choose another ${cardName} printing`}
+                description="Choose the physical printing you actually have. It will replace this deck copy and be added to your collection when you save the deck."
+                fixedQuantity={1}
+                actionLabel="Use this printing"
                 onCancel={() => setAddPrintingOpen(false)}
-                onAdd={async (printing, quantity, foil) => {
+                onAdd={async (printing, _quantity, foil) => {
                   const result = await resolveCard(printing.scryfall_id);
                   const card = result.matches[0];
                   if (!card) throw new Error("Could not load the selected printing");
-                  onDraftCardAdded(card, quantity, foil);
+                  onDraftPrintingAdded(card, foil);
                 }}
               />
             </div>

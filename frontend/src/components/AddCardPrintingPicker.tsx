@@ -15,12 +15,16 @@ export function AddCardPrintingPicker({
   sourceScryfallId,
   title = "Choose a printing",
   description = "Select the exact physical printing you are adding.",
+  fixedQuantity,
+  actionLabel,
   onCancel,
   onAdd,
 }: {
   sourceScryfallId: string;
   title?: string;
   description?: string;
+  fixedQuantity?: number;
+  actionLabel?: string;
   onCancel: () => void;
   onAdd: (printing: PrintingOption, quantity: number, foil: boolean) => Promise<void>;
 }) {
@@ -67,7 +71,7 @@ export function AddCardPrintingPicker({
 
   function choose(option: PrintingOption) {
     setSelected(option);
-    setQuantity(1);
+    setQuantity(fixedQuantity ?? 1);
     setFoil(option.foil && !option.nonfoil);
     setError(null);
   }
@@ -148,22 +152,26 @@ export function AddCardPrintingPicker({
 
       {selected && (
         <div className="mt-4 rounded-xl border border-white/10 bg-ink-900/60 p-3">
-          <label className="block text-xs font-medium text-stone-300">
-            How many to add?
-            <input
-              ref={quantityRef}
-              type="number"
-              min={1}
-              max={999999}
-              step={1}
-              value={quantity}
-              onChange={(event) => setQuantity(Number(event.target.value))}
-              onKeyDown={(event) => {
-                if (event.key === "Enter") void add();
-              }}
-              className="mt-1 block w-28 rounded-xl border border-white/10 bg-ink-950/60 px-3 py-2 font-mono text-sm text-stone-200 outline-none focus:ring-2 focus:ring-emerald-400/35"
-            />
-          </label>
+          {fixedQuantity === undefined ? (
+            <label className="block text-xs font-medium text-stone-300">
+              How many to add?
+              <input
+                ref={quantityRef}
+                type="number"
+                min={1}
+                max={999999}
+                step={1}
+                value={quantity}
+                onChange={(event) => setQuantity(Number(event.target.value))}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") void add();
+                }}
+                className="mt-1 block w-28 rounded-xl border border-white/10 bg-ink-950/60 px-3 py-2 font-mono text-sm text-stone-200 outline-none focus:ring-2 focus:ring-emerald-400/35"
+              />
+            </label>
+          ) : (
+            <p className="text-xs text-stone-400">One physical copy will be added to your collection.</p>
+          )}
           {selected.foil && selected.nonfoil && (
             <div className="mt-3 flex gap-2" aria-label="Card treatment">
               <button type="button" onClick={() => setFoil(false)} className={`rounded-lg px-3 py-2 text-xs ${!foil ? "bg-emerald-500/20 text-emerald-100 ring-1 ring-emerald-400/30" : "bg-white/5 text-stone-400"}`}>Nonfoil</button>
@@ -178,7 +186,9 @@ export function AddCardPrintingPicker({
       <div className="mt-4 flex justify-end gap-2">
         <button type="button" onClick={onCancel} className="rounded-xl border border-white/10 px-4 py-2 text-xs text-stone-400 hover:bg-white/5">Cancel</button>
         <button type="button" disabled={!selected || saving} onClick={() => void add()} className="rounded-xl bg-emerald-500/20 px-4 py-2 text-xs font-medium text-emerald-100 ring-1 ring-emerald-400/30 disabled:opacity-40">
-          {saving ? "Adding…" : selected ? `Add ${quantity} ${quantity === 1 ? "copy" : "copies"}` : "Select a printing"}
+          {saving
+            ? actionLabel ? "Saving…" : "Adding…"
+            : selected ? actionLabel ?? `Add ${quantity} ${quantity === 1 ? "copy" : "copies"}` : "Select a printing"}
         </button>
       </div>
     </section>

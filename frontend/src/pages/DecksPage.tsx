@@ -7,8 +7,10 @@ import {
   importDeckCsvNew,
   importDeckTextNew,
   previewDeckBackup,
+  scanProxyReplacements,
   type DeckBackupPreview,
   type Deck,
+  type ProxyReplacementScan,
 } from "../api";
 import { CONSTRUCTED_FORMATS, formatOptionLabel } from "../lib/formats";
 
@@ -24,6 +26,8 @@ export default function DecksPage() {
   const [status, setStatus] = useState("building");
   const [creating, setCreating] = useState(false);
   const [deckSort, setDeckSort] = useState<DeckSort>("name");
+  const [proxyScan, setProxyScan] = useState<ProxyReplacementScan | null>(null);
+  const [proxyScanBusy, setProxyScanBusy] = useState(false);
 
   const [csvFile, setCsvFile] = useState<File | null>(null);
   const [csvDeckName, setCsvDeckName] = useState("");
@@ -103,6 +107,18 @@ export default function DecksPage() {
       setErr(e instanceof Error ? e.message : "Create failed");
     } finally {
       setCreating(false);
+    }
+  }
+
+  async function scanProxies() {
+    setProxyScanBusy(true);
+    setErr(null);
+    try {
+      setProxyScan(await scanProxyReplacements());
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "Proxy scan failed");
+    } finally {
+      setProxyScanBusy(false);
     }
   }
 
@@ -480,23 +496,70 @@ export default function DecksPage() {
         <div className="rounded-xl border border-red-500/30 bg-red-950/40 px-4 py-3 text-sm text-red-200">{err}</div>
       )}
 
+      {proxyScan && (
+        <section className="rounded-2xl border border-emerald-400/20 bg-emerald-500/5 p-5 shadow-card">
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <h2 className="font-display text-xl text-stone-100">Proxy replacement scan</h2>
+              <p className="mt-1 text-sm text-stone-400">
+                {proxyScan.scanned_proxy_cards === 0
+                  ? "No cards are currently marked as proxies."
+                  : proxyScan.replaceable_proxy_cards === 0
+                    ? `Checked ${proxyScan.scanned_proxy_cards} proxied ${proxyScan.scanned_proxy_cards === 1 ? "card" : "cards"}. No unclaimed physical copies are available yet.`
+                    : `${proxyScan.replaceable_proxy_cards} of ${proxyScan.scanned_proxy_cards} proxied ${proxyScan.scanned_proxy_cards === 1 ? "card" : "cards"} can be replaced with collection copies.`}
+              </p>
+            </div>
+            <button type="button" onClick={() => setProxyScan(null)} className="rounded-lg px-2 py-1 text-stone-500 hover:bg-white/5 hover:text-stone-200" aria-label="Close proxy scan">✕</button>
+          </div>
+          {proxyScan.decks.length > 0 && (
+            <div className="mt-5 grid gap-3 md:grid-cols-2">
+              {proxyScan.decks.map((result) => (
+                <div key={result.deck_id} className="rounded-xl border border-white/10 bg-ink-950/45 p-4">
+                  <Link to={`/decks/${result.deck_id}`} className="font-medium text-emerald-200 hover:text-emerald-100">
+                    {result.deck_name}
+                  </Link>
+                  <p className="mt-1 text-xs text-stone-500">These proxies can use real collection copies:</p>
+                  <ul className="mt-3 space-y-1.5 text-sm text-stone-300">
+                    {result.cards.map((card) => (
+                      <li key={`${result.deck_id}-${card.oracle_id}`}>
+                        {card.quantity > 1 ? `${card.quantity}× ` : ""}{card.name}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
+      )}
+
       <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
         <div>
           <h2 className="font-display text-2xl text-stone-100">Your decks</h2>
           <p className="mt-1 text-sm text-stone-500">{decks.length} {decks.length === 1 ? "deck" : "decks"}</p>
         </div>
-        <label className="text-xs font-medium uppercase tracking-wider text-stone-500">
-          Sort decks
-          <select
-            value={deckSort}
-            onChange={(event) => setDeckSort(event.target.value as DeckSort)}
-            className="mt-1 block w-full rounded-xl border border-white/10 bg-ink-950/60 px-4 py-2.5 text-sm normal-case tracking-normal text-stone-200 outline-none sm:w-64"
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-end">
+          <button
+            type="button"
+            disabled={proxyScanBusy || decks.length === 0}
+            onClick={() => void scanProxies()}
+            className="rounded-xl bg-emerald-500/15 px-4 py-2.5 text-sm font-medium text-emerald-100 ring-1 ring-emerald-400/25 transition hover:bg-emerald-500/25 disabled:opacity-40"
           >
-            <option value="name">Deck name · A–Z</option>
-            <option value="commander">Commander name · A–Z</option>
-            <option value="completed">Completed first</option>
-          </select>
-        </label>
+            {proxyScanBusy ? "Scanning proxies…" : "Scan proxy replacements"}
+          </button>
+          <label className="text-xs font-medium uppercase tracking-wider text-stone-500">
+            Sort decks
+            <select
+              value={deckSort}
+              onChange={(event) => setDeckSort(event.target.value as DeckSort)}
+              className="mt-1 block w-full rounded-xl border border-white/10 bg-ink-950/60 px-4 py-2.5 text-sm normal-case tracking-normal text-stone-200 outline-none sm:w-64"
+            >
+              <option value="name">Deck name · A–Z</option>
+              <option value="commander">Commander name · A–Z</option>
+              <option value="completed">Completed first</option>
+            </select>
+          </label>
+        </div>
       </div>
 
       <div className="grid gap-4 sm:grid-cols-2">

@@ -9,6 +9,9 @@ from fastapi.testclient import TestClient
 from app.database import SessionLocal
 from app.models import (
     CardPrinting,
+    Deck,
+    DeckCard,
+    DeckCardAllocation,
     InventoryLine,
     MechanicProfileRecord,
     OracleCard,
@@ -173,3 +176,127 @@ def test_collection_import_rejects_invalid_backup_without_changing_inventory(
     assert response.status_code == 400
     with SessionLocal() as db:
         assert db.query(InventoryLine).one().quantity == 3
+
+
+def test_collection_import_rejects_snapshot_with_too_few_grabbed_cards(
+    client: TestClient,
+) -> None:
+    _seed_portable_collection()
+    exported = client.get("/api/export/collection")
+    payload = json.loads(gzip.decompress(exported.content))
+    payload["inventory_lines"][0]["quantity"] = 1
+
+    with SessionLocal() as db:
+        deck = Deck(name="Grabbed Deck", format="commander", status="building")
+        db.add(deck)
+        db.flush()
+        card = DeckCard(
+            deck_id=deck.id,
+            scryfall_id=SCRYFALL_ID,
+            oracle_id=ORACLE_ID,
+            quantity=2,
+            grabbed_quantity=2,
+        )
+        db.add(card)
+        db.flush()
+        db.add(DeckCardAllocation(
+            deck_card_id=card.id,
+            status="grabbed",
+            quantity=2,
+            scryfall_id=None,
+            foil=None,
+        ))
+        db.commit()
+
+    response = client.post(
+        "/api/import/collection",
+        files={"file": ("too-small.json", json.dumps(payload), "application/json")},
+    )
+    assert response.status_code == 409
+    assert "Portable Ring: 2 grabbed, but the snapshot contains 1" in response.json()["detail"]
+    with SessionLocal() as db:
+        assert db.query(InventoryLine).one().quantity == 3
+        assert db.query(DeckCard).one().grabbed_quantity == 2
+
+
+def test_collection_import_rejects_snapshot_with_wrong_grabbed_treatment(
+    client: TestClient,
+) -> None:
+    _seed_portable_collection()
+    exported = client.get("/api/export/collection")
+    payload = json.loads(gzip.decompress(exported.content))
+    payload["inventory_lines"][0]["foil"] = False
+
+    with SessionLocal() as db:
+        deck = Deck(name="Foil Deck", format="commander", status="building")
+        db.add(deck)
+        db.flush()
+        card = DeckCard(
+            deck_id=deck.id,
+            scryfall_id=SCRYFALL_ID,
+            oracle_id=ORACLE_ID,
+            quantity=1,
+            grabbed_quantity=1,
+        )
+        db.add(card)
+        db.flush()
+        db.add(DeckCardAllocation(
+            deck_card_id=card.id,
+            status="grabbed",
+            quantity=1,
+            scryfall_id=SCRYFALL_ID,
+            foil=True,
+        ))
+        db.commit()
+
+    response = client.post(
+        "/api/import/collection",
+        files={"file": ("wrong-treatment.json", json.dumps(payload), "application/json")},
+    )
+    assert response.status_code == 409
+    assert "exact foil printing: 1 grabbed, but the snapshot contains 0" in response.json()["detail"]
+    with SessionLocal() as db:
+        line = db.query(InventoryLine).one()
+        assert line.quantity == 3
+        assert line.foil is True
+
+
+def test_collection_import_preserves_supported_grabbed_allocation(
+    client: TestClient,
+) -> None:
+    _seed_portable_collection()
+    exported = client.get("/api/export/collection")
+
+    with SessionLocal() as db:
+        deck = Deck(name="Supported Deck", format="commander", status="building")
+        db.add(deck)
+        db.flush()
+        card = DeckCard(
+            deck_id=deck.id,
+            scryfall_id=SCRYFALL_ID,
+            oracle_id=ORACLE_ID,
+            quantity=1,
+            grabbed_quantity=1,
+        )
+        db.add(card)
+        db.flush()
+        db.add(DeckCardAllocation(
+            deck_card_id=card.id,
+            status="grabbed",
+            quantity=1,
+            scryfall_id=SCRYFALL_ID,
+            foil=True,
+        ))
+        db.commit()
+
+    response = client.post(
+        "/api/import/collection",
+        files={"file": ("supported.json.gz", exported.content, "application/gzip")},
+    )
+    assert response.status_code == 200, response.text
+    with SessionLocal() as db:
+        assert db.query(InventoryLine).one().quantity == 3
+        allocation = db.query(DeckCardAllocation).one()
+        assert allocation.status == "grabbed"
+        assert allocation.scryfall_id == SCRYFALL_ID
+        assert allocation.foil is True

@@ -2,14 +2,18 @@ from __future__ import annotations
 
 import base64
 import binascii
+from collections import Counter
 from datetime import UTC, datetime
 
 from fastapi import HTTPException
 from pydantic import ValidationError
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.models import (
     CardPrinting,
+    DeckCard,
+    DeckCardAllocation,
     InventoryLine,
     MechanicProfileRecord,
     OracleCard,
@@ -152,6 +156,97 @@ def parse_collection_backup(raw_json: bytes) -> CollectionBackup:
         raise HTTPException(400, detail=detail) from exc
 
 
+def _validate_grabbed_cards_against_backup(
+    db: Session,
+    backup: CollectionBackup,
+) -> None:
+    """Reject snapshots that cannot support current physical deck locations."""
+    printing_oracles = {
+        printing.scryfall_id: printing.oracle_id for printing in backup.printings
+    }
+    card_names = {card.oracle_id: card.name for card in backup.oracle_cards}
+    owned_by_oracle: Counter[str] = Counter()
+    owned_by_printing: Counter[str] = Counter()
+    owned_by_treatment: Counter[tuple[str, bool]] = Counter()
+    for line in backup.inventory_lines:
+        oracle_id = printing_oracles[line.scryfall_id]
+        owned_by_oracle[oracle_id] += line.quantity
+        owned_by_printing[line.scryfall_id] += line.quantity
+        owned_by_treatment[(line.scryfall_id, line.foil)] += line.quantity
+
+    conflicts: list[str] = []
+    grabbed_by_oracle = (
+        db.query(
+            DeckCard.oracle_id,
+            func.coalesce(func.sum(DeckCard.grabbed_quantity), 0),
+        )
+        .filter(DeckCard.grabbed_quantity > 0)
+        .group_by(DeckCard.oracle_id)
+        .all()
+    )
+    for oracle_id, grabbed in grabbed_by_oracle:
+        grabbed = int(grabbed or 0)
+        owned = owned_by_oracle[oracle_id]
+        if owned < grabbed:
+            name = card_names.get(oracle_id) or oracle_id
+            conflicts.append(f"{name}: {grabbed} grabbed, but the snapshot contains {owned}")
+
+    exact_grabbed = (
+        db.query(
+            DeckCardAllocation.scryfall_id,
+            DeckCardAllocation.foil,
+            func.coalesce(func.sum(DeckCardAllocation.quantity), 0),
+        )
+        .filter(
+            DeckCardAllocation.status == "grabbed",
+            DeckCardAllocation.scryfall_id.is_not(None),
+        )
+        .group_by(DeckCardAllocation.scryfall_id, DeckCardAllocation.foil)
+        .all()
+    )
+    printing_names = {
+        printing.scryfall_id: card_names.get(printing.oracle_id, printing.scryfall_id)
+        for printing in backup.printings
+    }
+    exact_totals: Counter[str] = Counter()
+    for scryfall_id, _foil, quantity in exact_grabbed:
+        exact_totals[scryfall_id] += int(quantity or 0)
+    for scryfall_id, grabbed in exact_totals.items():
+        owned = owned_by_printing[scryfall_id]
+        if owned < grabbed:
+            name = printing_names.get(scryfall_id, scryfall_id)
+            conflicts.append(
+                f"{name} exact printing {scryfall_id}: {grabbed} grabbed, "
+                f"but the snapshot contains {owned}"
+            )
+    for scryfall_id, foil, quantity in exact_grabbed:
+        if foil is None:
+            continue
+        grabbed = int(quantity or 0)
+        owned = owned_by_treatment[(scryfall_id, bool(foil))]
+        if owned < grabbed:
+            name = printing_names.get(scryfall_id, scryfall_id)
+            treatment = "foil" if foil else "nonfoil"
+            conflicts.append(
+                f"{name} exact {treatment} printing: {grabbed} grabbed, "
+                f"but the snapshot contains {owned}"
+            )
+
+    if conflicts:
+        shown = "; ".join(conflicts[:5])
+        remainder = len(conflicts) - 5
+        if remainder > 0:
+            shown += f"; and {remainder} more conflict(s)"
+        raise HTTPException(
+            409,
+            detail=(
+                "Collection restore was not applied because it would leave grabbed deck "
+                f"cards without physical copies. {shown}. Move those deck copies to Needed "
+                "or Proxy, or restore a snapshot containing enough copies."
+            ),
+        )
+
+
 def restore_collection_backup(db: Session, backup: CollectionBackup) -> CollectionImportResult:
     oracle_ids = {card.oracle_id for card in backup.oracle_cards}
     printing_ids = {printing.scryfall_id for printing in backup.printings}
@@ -165,6 +260,7 @@ def restore_collection_backup(db: Session, backup: CollectionBackup) -> Collecti
         raise HTTPException(400, detail="An embedding references a card missing from the backup")
     if any(preference.oracle_id not in oracle_ids for preference in backup.card_preferences):
         raise HTTPException(400, detail="A preference references a card missing from the backup")
+    _validate_grabbed_cards_against_backup(db, backup)
 
     try:
         for source in backup.oracle_cards:

@@ -67,6 +67,9 @@ from app.schemas import (
     InventoryPrintingChange,
     InventoryPrintingChangeOut,
     PrintingOptionOut,
+    ProxyReplacementCardOut,
+    ProxyReplacementDeckOut,
+    ProxyReplacementScanOut,
 )
 from app.services.matcher import match_new_cards
 from app.services.collection_transfer import (
@@ -1805,6 +1808,84 @@ def list_decks(db: Annotated[Session, Depends(get_db)]):
         )
         for deck, commander_name in rows
     ]
+
+
+@app.get("/api/decks/proxy-replacements", response_model=ProxyReplacementScanOut)
+def scan_proxy_replacements(db: Annotated[Session, Depends(get_db)]):
+    """Find proxied deck copies that can use an unclaimed physical card."""
+    owned_by_oracle = {
+        oracle_id: int(quantity or 0)
+        for oracle_id, quantity in (
+            db.query(
+                CardPrinting.oracle_id,
+                func.coalesce(func.sum(InventoryLine.quantity), 0),
+            )
+            .join(InventoryLine, InventoryLine.scryfall_id == CardPrinting.scryfall_id)
+            .group_by(CardPrinting.oracle_id)
+            .all()
+        )
+    }
+    grabbed_by_oracle = {
+        oracle_id: int(quantity or 0)
+        for oracle_id, quantity in (
+            db.query(
+                DeckCard.oracle_id,
+                func.coalesce(func.sum(DeckCard.grabbed_quantity), 0),
+            )
+            .group_by(DeckCard.oracle_id)
+            .all()
+        )
+    }
+    available_by_oracle = {
+        oracle_id: max(0, owned - grabbed_by_oracle.get(oracle_id, 0))
+        for oracle_id, owned in owned_by_oracle.items()
+    }
+
+    proxy_rows = (
+        db.query(DeckCard, Deck.name, OracleCard.name)
+        .join(Deck, DeckCard.deck_id == Deck.id)
+        .join(OracleCard, DeckCard.oracle_id == OracleCard.oracle_id)
+        .filter(DeckCard.proxy_quantity > 0)
+        .order_by(Deck.id, DeckCard.id)
+        .all()
+    )
+    scanned_proxy_cards = sum(row.proxy_quantity for row, _, _ in proxy_rows)
+    grouped: dict[int, dict] = {}
+    replaceable_proxy_cards = 0
+    for deck_card, deck_name, card_name in proxy_rows:
+        available = available_by_oracle.get(deck_card.oracle_id, 0)
+        replaceable = min(deck_card.proxy_quantity, available)
+        if replaceable <= 0:
+            continue
+        available_by_oracle[deck_card.oracle_id] = available - replaceable
+        replaceable_proxy_cards += replaceable
+        deck_result = grouped.setdefault(
+            deck_card.deck_id,
+            {"deck_id": deck_card.deck_id, "deck_name": deck_name, "cards": {}},
+        )
+        card_result = deck_result["cards"].setdefault(
+            deck_card.oracle_id,
+            {
+                "deck_card_id": deck_card.id,
+                "oracle_id": deck_card.oracle_id,
+                "name": card_name,
+                "quantity": 0,
+            },
+        )
+        card_result["quantity"] += replaceable
+
+    return ProxyReplacementScanOut(
+        scanned_proxy_cards=scanned_proxy_cards,
+        replaceable_proxy_cards=replaceable_proxy_cards,
+        decks=[
+            ProxyReplacementDeckOut(
+                deck_id=deck["deck_id"],
+                deck_name=deck["deck_name"],
+                cards=[ProxyReplacementCardOut(**card) for card in deck["cards"].values()],
+            )
+            for deck in grouped.values()
+        ],
+    )
 
 
 @app.post("/api/decks", response_model=DeckDetailOut)

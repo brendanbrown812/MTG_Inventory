@@ -156,6 +156,21 @@ export type DeckCardAllocation = {
 
 export type DeckDetail = Deck & { cards: DeckCard[] };
 
+export type ProxyReplacementScan = {
+  scanned_proxy_cards: number;
+  replaceable_proxy_cards: number;
+  decks: Array<{
+    deck_id: number;
+    deck_name: string;
+    cards: Array<{
+      deck_card_id: number;
+      oracle_id: string;
+      name: string;
+      quantity: number;
+    }>;
+  }>;
+};
+
 export type DeckTextPreviewCard = {
   line_index: number;
   quantity: number;
@@ -455,6 +470,12 @@ export async function fetchManaboxImportProgress(
 
 export async function fetchDecks(): Promise<Deck[]> {
   const r = await fetch(`${base}/api/decks`);
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+
+export async function scanProxyReplacements(): Promise<ProxyReplacementScan> {
+  const r = await fetch(`${base}/api/decks/proxy-replacements`);
   if (!r.ok) throw new Error(await r.text());
   return r.json();
 }

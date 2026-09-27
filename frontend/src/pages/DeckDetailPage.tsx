@@ -770,6 +770,13 @@ export default function DeckDetailPage() {
                         <p className="truncate text-[10px] text-stone-500">
                           {[displayed.set_code?.toUpperCase(), displayed.collector_number, copy.foil ? "Foil" : null].filter(Boolean).join(" · ") || copy.card.type_line || "Any printing"}
                         </p>
+                        <button
+                          type="button"
+                          onClick={() => setPrintingEditorKey(copy.key)}
+                          className="mt-2 w-full rounded-md border border-white/10 bg-white/5 px-2 py-1 text-[9px] font-semibold uppercase tracking-wide text-stone-400 hover:border-emerald-400/30 hover:bg-emerald-500/10 hover:text-emerald-200"
+                        >
+                          Change printing
+                        </button>
                         <div className="grid grid-cols-4 gap-1 pt-2">
                           {(["pending", "grabbed", "proxy"] as const).map((status) => (
                             <button
@@ -821,6 +828,14 @@ export default function DeckDetailPage() {
               printing: allocation?.printing ?? null,
               foil: allocation?.foil ?? null,
               status: allocation?.status ?? copy.status,
+              addToCollection: Boolean(
+                copy.addToCollection
+                && allocation?.scryfall_id === copy.printingScryfallId
+              ),
+              collectionAdditionId: (
+                copy.addToCollection
+                && allocation?.scryfall_id === copy.printingScryfallId
+              ) ? copy.collectionAdditionId : null,
             } : copy));
             setDraftDirty(true);
             setPrintingEditorKey(null);
@@ -834,23 +849,21 @@ export default function DeckDetailPage() {
             setDraftDirty(true);
             setPrintingEditorKey(null);
           }}
-          onDraftCardAdded={(card, quantity, foil) => {
-            setDraftCopies((previous) => [
-              ...previous,
-              ...Array.from({ length: quantity }, () => ({
-                key: `new-${nextDraftKey.current++}`,
-                card,
-                cardScryfallId: card.scryfall_id,
-                printingScryfallId: card.scryfall_id,
-                printing: card,
-                status: "grabbed" as const,
-                foil,
-                isCommander: false,
-                isSideboard: false,
-                addToCollection: true,
-                collectionAdditionId: randomUuid(),
-              })),
-            ]);
+          onDraftPrintingAdded={(card, foil) => {
+            setDraftCopies((previous) => previous.map((copy) => (
+              copy.key === selectedDraftCopy.key
+                ? {
+                    ...copy,
+                    printingScryfallId: card.scryfall_id,
+                    printing: card,
+                    status: "grabbed" as const,
+                    foil,
+                    addToCollection: true,
+                    collectionAdditionId: randomUuid(),
+                  }
+                : copy
+            )));
+            if (selectedDraftCopy.isCommander) setCommanderId(card.scryfall_id);
             setDraftDirty(true);
             setPrintingEditorKey(null);
           }}

@@ -293,6 +293,26 @@ class DeckOut(BaseModel):
     commander_scryfall_id: str | None
     commander_name: str | None = None
 
+
+class ProxyReplacementCardOut(BaseModel):
+    deck_card_id: int
+    oracle_id: str
+    name: str
+    quantity: int
+
+
+class ProxyReplacementDeckOut(BaseModel):
+    deck_id: int
+    deck_name: str
+    cards: list[ProxyReplacementCardOut]
+
+
+class ProxyReplacementScanOut(BaseModel):
+    scanned_proxy_cards: int
+    replaceable_proxy_cards: int
+    decks: list[ProxyReplacementDeckOut]
+
+
 class DeckDetailOut(DeckOut):
     cards: list["DeckCardOut"] = Field(default_factory=list)
 
