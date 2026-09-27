@@ -836,6 +836,7 @@ export default function DeckAssemblyPage() {
               </label>
               <button type="button" disabled={working} onClick={() => void setAllStatuses("grabbed")} className="rounded-lg border border-white/10 bg-ink-800 px-3 py-2 text-xs text-stone-300 hover:bg-ink-700 disabled:opacity-40">Mark all grabbed</button>
               <button type="button" disabled={working} onClick={() => void setAllStatuses("pending")} className="rounded-lg border border-white/10 bg-ink-800 px-3 py-2 text-xs text-stone-300 hover:bg-ink-700 disabled:opacity-40">Mark all needed</button>
+              <button type="button" disabled={working} onClick={() => void setAllStatuses("proxy")} className="rounded-lg border border-white/10 bg-ink-800 px-3 py-2 text-xs text-stone-300 hover:bg-ink-700 disabled:opacity-40">Mark all proxied</button>
             </div>
           </div>
 

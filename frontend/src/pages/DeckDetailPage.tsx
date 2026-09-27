@@ -322,6 +322,20 @@ export default function DeckDetailPage() {
     }
   }
 
+  function setAllDraftStatuses(status: DraftStatus) {
+    if (draftCopies.length === 0) return;
+    setDraftCopies((previous) => previous.map((copy) => {
+      const keepCollectionAddition = copy.addToCollection && status === "grabbed";
+      return {
+        ...copy,
+        status,
+        addToCollection: keepCollectionAddition,
+        collectionAdditionId: keepCollectionAddition ? copy.collectionAdditionId : null,
+      };
+    }));
+    setDraftDirty(true);
+  }
+
   function stageCard(card: CardMatch) {
     const key = `new-${nextDraftKey.current++}`;
     setDraftCopies((previous) => [
@@ -643,6 +657,38 @@ export default function DeckDetailPage() {
             className="mt-1 w-full rounded-xl border border-white/10 bg-ink-950/60 px-3 py-2 text-sm"
           />
           <div className="mt-4 border-t border-white/10 pt-4">
+            <label className="block text-xs text-stone-500">Set every card status</label>
+            <p className="mt-1 text-[11px] leading-relaxed text-stone-600">
+              Applies to every main-deck and sideboard copy when you save your changes.
+            </p>
+            <div className="mt-2 grid grid-cols-3 gap-2">
+              <button
+                type="button"
+                disabled={draftCopies.length === 0}
+                onClick={() => setAllDraftStatuses("pending")}
+                className="rounded-lg bg-amber-500/15 px-2 py-2 text-xs font-semibold text-amber-100 ring-1 ring-amber-400/20 disabled:opacity-40"
+              >
+                Need
+              </button>
+              <button
+                type="button"
+                disabled={draftCopies.length === 0}
+                onClick={() => setAllDraftStatuses("grabbed")}
+                className="rounded-lg bg-emerald-500/15 px-2 py-2 text-xs font-semibold text-emerald-100 ring-1 ring-emerald-400/20 disabled:opacity-40"
+              >
+                Grabbed
+              </button>
+              <button
+                type="button"
+                disabled={draftCopies.length === 0}
+                onClick={() => setAllDraftStatuses("proxy")}
+                className="rounded-lg bg-violet-500/15 px-2 py-2 text-xs font-semibold text-violet-100 ring-1 ring-violet-400/20 disabled:opacity-40"
+              >
+                Proxied
+              </button>
+            </div>
+          </div>
+          <div className="mt-4 border-t border-white/10 pt-4">
             <label className="block text-xs text-stone-500">Set every available printing</label>
             <p className="mt-1 text-[11px] leading-relaxed text-stone-600">
               Enter a set code such as SCD. Cards without a printing in that set are left unchanged.
@@ -892,6 +938,7 @@ export default function DeckDetailPage() {
                                   ...row,
                                   status,
                                   addToCollection: row.addToCollection && status === "grabbed",
+                                  collectionAdditionId: row.addToCollection && status === "grabbed" ? row.collectionAdditionId : null,
                                 } : row));
                                 setDraftDirty(true);
                               }}
