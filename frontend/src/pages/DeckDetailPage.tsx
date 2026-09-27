@@ -136,6 +136,7 @@ function AnalysisPanel({ analysis, loading }: { analysis: DeckAnalysis | null; l
 }
 
 type DraftStatus = "pending" | "grabbed" | "proxy";
+type DraftAction = DraftStatus | "added";
 
 type DraftCopy = {
   key: string;
@@ -149,6 +150,15 @@ type DraftCopy = {
   isSideboard: boolean;
   addToCollection: boolean;
   collectionAdditionId: string | null;
+  persistedGrabbed: boolean;
+  persistedPrintingScryfallId: string | null;
+  persistedFoil: boolean | null;
+};
+
+type DraftCollectionRemoval = {
+  card_scryfall_id: string;
+  printing_scryfall_id: string | null;
+  foil: boolean | null;
 };
 
 function copiesFromDeck(deck: DeckDetail): DraftCopy[] {
@@ -182,6 +192,9 @@ function copiesFromDeck(deck: DeckDetail): DraftCopy[] {
       isSideboard: entry.is_sideboard,
       addToCollection: false,
       collectionAdditionId: null,
+      persistedGrabbed: allocation.status === "grabbed",
+      persistedPrintingScryfallId: allocation.status === "grabbed" ? allocation.scryfall_id : null,
+      persistedFoil: allocation.status === "grabbed" ? allocation.foil : null,
     }));
   }).filter((copy) => copy.card);
 }
@@ -219,7 +232,8 @@ export default function DeckDetailPage() {
   const [pickList, setPickList] = useState<CardMatch[] | null>(null);
   const [draftCopies, setDraftCopies] = useState<DraftCopy[]>([]);
   const [draftDirty, setDraftDirty] = useState(false);
-  const [addMissingGrabbedToCollection, setAddMissingGrabbedToCollection] = useState(false);
+  const [collectionRemovals, setCollectionRemovals] = useState<DraftCollectionRemoval[]>([]);
+  const [removalPrompt, setRemovalPrompt] = useState<DraftCopy | null>(null);
   const [printingEditorKey, setPrintingEditorKey] = useState<string | null>(null);
   const [bulkSetCode, setBulkSetCode] = useState("");
   const [bulkSetBusy, setBulkSetBusy] = useState(false);
@@ -267,7 +281,8 @@ export default function DeckDetailPage() {
       setDraftCopies(copiesFromDeck(d));
       setCommanderId(d.commander_scryfall_id ?? "");
       setDraftDirty(false);
-      setAddMissingGrabbedToCollection(false);
+      setCollectionRemovals([]);
+      setRemovalPrompt(null);
       void refreshAnalysis(d.format);
     } catch (e) {
       setErr(e instanceof Error ? e.message : "Failed to load deck");
@@ -311,13 +326,14 @@ export default function DeckDetailPage() {
           add_to_collection: copy.addToCollection,
           collection_addition_id: copy.collectionAdditionId,
         })),
-        add_missing_grabbed_to_collection: addMissingGrabbedToCollection,
+        collection_removals: collectionRemovals,
       });
       setDeck(d);
       setDraftCopies(copiesFromDeck(d));
       setCommanderId(d.commander_scryfall_id ?? "");
       setDraftDirty(false);
-      setAddMissingGrabbedToCollection(false);
+      setCollectionRemovals([]);
+      setRemovalPrompt(null);
       void refreshAnalysis(d.format);
     } catch (e) {
       setErr(e instanceof Error ? e.message : "Save failed");
@@ -326,18 +342,31 @@ export default function DeckDetailPage() {
     }
   }
 
-  function setAllDraftStatuses(status: DraftStatus) {
-    if (draftCopies.length === 0) return;
-    setDraftCopies((previous) => previous.map((copy) => {
-      const keepCollectionAddition = copy.addToCollection && status === "grabbed";
+  function applyDraftAction(copy: DraftCopy, action: DraftAction): DraftCopy {
+    if (action === "added") {
+      const printing = copy.printing ?? copy.card;
+      const foil = copy.foil ?? false;
       return {
         ...copy,
-        status,
-        addToCollection: keepCollectionAddition,
-        collectionAdditionId: keepCollectionAddition ? copy.collectionAdditionId : null,
+        printingScryfallId: copy.printingScryfallId ?? copy.cardScryfallId,
+        printing,
+        status: "grabbed",
+        foil,
+        addToCollection: true,
+        collectionAdditionId: copy.collectionAdditionId ?? randomUuid(),
       };
-    }));
-    setAddMissingGrabbedToCollection(status === "grabbed");
+    }
+    return {
+      ...copy,
+      status: action,
+      addToCollection: false,
+      collectionAdditionId: null,
+    };
+  }
+
+  function setAllDraftStatuses(action: DraftAction) {
+    if (draftCopies.length === 0) return;
+    setDraftCopies((previous) => previous.map((copy) => applyDraftAction(copy, action)));
     setDraftDirty(true);
   }
 
@@ -357,6 +386,9 @@ export default function DeckDetailPage() {
         isSideboard: false,
         addToCollection: false,
         collectionAdditionId: null,
+        persistedGrabbed: false,
+        persistedPrintingScryfallId: null,
+        persistedFoil: null,
       },
     ]);
     setDraftDirty(true);
@@ -455,6 +487,9 @@ export default function DeckDetailPage() {
         isSideboard: false,
         addToCollection: false,
         collectionAdditionId: null,
+        persistedGrabbed: false,
+        persistedPrintingScryfallId: null,
+        persistedFoil: null,
       }))
     ));
     const hasCommander = additions.some((copy) => copy.isCommander);
@@ -500,10 +535,21 @@ export default function DeckDetailPage() {
     }
   }
 
-  function removeCopy(key: string) {
+  function removeCopy(key: string, removeFromCollection = false) {
     const removed = draftCopies.find((copy) => copy.key === key);
+    if (removed && removeFromCollection) {
+      setCollectionRemovals((previous) => [
+        ...previous,
+        {
+          card_scryfall_id: removed.cardScryfallId,
+          printing_scryfall_id: removed.persistedPrintingScryfallId,
+          foil: removed.persistedFoil,
+        },
+      ]);
+    }
     setDraftCopies((previous) => previous.filter((copy) => copy.key !== key));
     if (removed?.isCommander) setCommanderId("");
+    setRemovalPrompt(null);
     setDraftDirty(true);
   }
 
@@ -664,9 +710,9 @@ export default function DeckDetailPage() {
           <div className="mt-4 border-t border-white/10 pt-4">
             <label className="block text-xs text-stone-500">Set every card status</label>
             <p className="mt-1 text-[11px] leading-relaxed text-stone-600">
-              Applies to every main-deck and sideboard copy when you save. Grabbed adds any missing selected printings to your collection.
+              Grabbed uses existing collection copies. Added creates new collection copies. Applies when you save.
             </p>
-            <div className="mt-2 grid grid-cols-3 gap-2">
+            <div className="mt-2 grid grid-cols-2 gap-2 sm:grid-cols-4">
               <button
                 type="button"
                 disabled={draftCopies.length === 0}
@@ -690,6 +736,14 @@ export default function DeckDetailPage() {
                 className="rounded-lg bg-violet-500/15 px-2 py-2 text-xs font-semibold text-violet-100 ring-1 ring-violet-400/20 disabled:opacity-40"
               >
                 Proxied
+              </button>
+              <button
+                type="button"
+                disabled={draftCopies.length === 0}
+                onClick={() => setAllDraftStatuses("added")}
+                className="rounded-lg bg-sky-500/15 px-2 py-2 text-xs font-semibold text-sky-100 ring-1 ring-sky-400/20 disabled:opacity-40"
+              >
+                Added
               </button>
             </div>
           </div>
@@ -932,32 +986,44 @@ export default function DeckDetailPage() {
                         >
                           Change printing
                         </button>
-                        <div className="grid grid-cols-4 gap-1 pt-2">
-                          {(["pending", "grabbed", "proxy"] as const).map((status) => (
+                        <div className="grid grid-cols-5 gap-1 pt-2">
+                          {(["pending", "grabbed", "proxy", "added"] as const).map((action) => {
+                            const selected = action === "added"
+                              ? copy.addToCollection
+                              : !copy.addToCollection && copy.status === action;
+                            return (
                             <button
-                              key={status}
+                              key={action}
                               type="button"
-                              disabled={copy.status === status}
+                              disabled={selected}
                               onClick={() => {
-                                setDraftCopies((previous) => previous.map((row) => row.key === copy.key ? {
-                                  ...row,
-                                  status,
-                                  addToCollection: row.addToCollection && status === "grabbed",
-                                  collectionAdditionId: row.addToCollection && status === "grabbed" ? row.collectionAdditionId : null,
-                                } : row));
+                                setDraftCopies((previous) => previous.map((row) => (
+                                  row.key === copy.key ? applyDraftAction(row, action) : row
+                                )));
                                 setDraftDirty(true);
                               }}
                               className={`rounded-md px-1 py-1 text-[9px] font-semibold uppercase tracking-wide ${
-                                copy.status === status
-                                  ? status === "grabbed" ? "bg-emerald-500/25 text-emerald-100" : status === "proxy" ? "bg-violet-500/25 text-violet-100" : "bg-amber-500/20 text-amber-100"
+                                selected
+                                  ? action === "grabbed" ? "bg-emerald-500/25 text-emerald-100" : action === "proxy" ? "bg-violet-500/25 text-violet-100" : action === "added" ? "bg-sky-500/25 text-sky-100" : "bg-amber-500/20 text-amber-100"
                                   : "bg-white/5 text-stone-500 hover:bg-white/10 hover:text-stone-200"
                               }`}
                             >
-                              {status === "pending" ? "Need" : status}
+                              {action === "pending" ? "Need" : action}
                             </button>
-                          ))}
-                          <button type="button" onClick={() => removeCopy(copy.key)} className="rounded-md bg-red-500/10 px-1 py-1 text-[9px] font-semibold uppercase tracking-wide text-red-300 hover:bg-red-500/20">
-                            Remove
+                            );
+                          })}
+                          <button
+                            type="button"
+                            onClick={() => {
+                              if (copy.status === "grabbed" && copy.persistedGrabbed && !copy.addToCollection) {
+                                setRemovalPrompt(copy);
+                              } else {
+                                removeCopy(copy.key);
+                              }
+                            }}
+                            className="rounded-md bg-red-500/10 px-1 py-1 text-[9px] font-semibold uppercase tracking-wide text-red-300 hover:bg-red-500/20"
+                          >
+                            Delete
                           </button>
                         </div>
                       </div>
@@ -1024,6 +1090,41 @@ export default function DeckDetailPage() {
             setPrintingEditorKey(null);
           }}
         />
+      )}
+      {removalPrompt && (
+        <div className="fixed inset-0 z-[110] flex items-center justify-center bg-black/75 p-4" role="dialog" aria-modal="true" aria-labelledby="remove-deck-copy-title">
+          <div className="w-full max-w-md rounded-2xl border border-white/10 bg-ink-900 p-6 shadow-2xl">
+            <h2 id="remove-deck-copy-title" className="font-display text-2xl text-stone-100">Remove {removalPrompt.card.name}?</h2>
+            <p className="mt-2 text-sm leading-relaxed text-stone-400">
+              This copy is currently grabbed from your collection. Choose whether to return it to bulk inventory or remove the physical card from your collection entirely.
+            </p>
+            <div className="mt-6 grid gap-3">
+              <button
+                type="button"
+                onClick={() => removeCopy(removalPrompt.key)}
+                className="rounded-xl bg-emerald-500/15 px-4 py-3 text-left text-sm font-medium text-emerald-100 ring-1 ring-emerald-400/25 hover:bg-emerald-500/20"
+              >
+                Return to bulk
+                <span className="mt-1 block text-xs font-normal text-emerald-200/65">Remove it from this deck but keep it in your collection.</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => removeCopy(removalPrompt.key, true)}
+                className="rounded-xl bg-red-500/15 px-4 py-3 text-left text-sm font-medium text-red-100 ring-1 ring-red-400/25 hover:bg-red-500/20"
+              >
+                Remove from collection
+                <span className="mt-1 block text-xs font-normal text-red-200/65">Use this if the card was sold, given away, or entered by mistake.</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setRemovalPrompt(null)}
+                className="rounded-xl border border-white/10 px-4 py-2 text-sm text-stone-300 hover:bg-white/5"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
       )}
       {navigationBlocker.state === "blocked" && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/75 p-4" role="dialog" aria-modal="true" aria-labelledby="unsaved-deck-title">

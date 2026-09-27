@@ -257,13 +257,21 @@ class DeckDraftCopyIn(BaseModel):
     collection_addition_id: str | None = Field(default=None, min_length=36, max_length=36)
 
 
+class DeckDraftCollectionRemovalIn(BaseModel):
+    card_scryfall_id: str = Field(min_length=36, max_length=36)
+    printing_scryfall_id: str | None = Field(default=None, min_length=36, max_length=36)
+    foil: bool | None = None
+
+
 class DeckDraftSave(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     format: str = Field(min_length=1, max_length=40)
     status: str = Field(min_length=1, max_length=20)
     notes: str | None = Field(default=None, max_length=50_000)
     cards: list[DeckDraftCopyIn] = Field(default_factory=list, max_length=1_000)
-    add_missing_grabbed_to_collection: bool = False
+    collection_removals: list[DeckDraftCollectionRemovalIn] = Field(
+        default_factory=list, max_length=1_000
+    )
 
 
 class DeckCreate(BaseModel):

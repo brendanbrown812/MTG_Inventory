@@ -2157,6 +2157,11 @@ def save_deck_draft(
         for copy in body.cards
         for value in (copy.card_scryfall_id, copy.printing_scryfall_id)
         if value
+    } | {
+        value
+        for removal in body.collection_removals
+        for value in (removal.card_scryfall_id, removal.printing_scryfall_id)
+        if value
     }
     printings = {
         scryfall_id: _require_card_cached(db, scryfall_id)
@@ -2194,8 +2199,46 @@ def save_deck_draft(
         grouped.setdefault(
             (base.oracle_id, copy.is_commander, copy.is_sideboard), []
         ).append(copy)
+    for removal in body.collection_removals:
+        base = printings[removal.card_scryfall_id]
+        exact = (
+            printings.get(removal.printing_scryfall_id)
+            if removal.printing_scryfall_id
+            else None
+        )
+        if exact is not None and exact.oracle_id != base.oracle_id:
+            raise HTTPException(422, detail="Collection removal printing does not match its deck card")
 
     existing_rows = db.query(DeckCard).filter(DeckCard.deck_id == deck_id).all()
+    removable_grabbed: Counter[tuple[str, str | None, bool | None]] = Counter()
+    for row in existing_rows:
+        grabbed_allocations = [
+            allocation for allocation in row.allocations
+            if allocation.status == "grabbed"
+        ]
+        if grabbed_allocations:
+            for allocation in grabbed_allocations:
+                removable_grabbed[(
+                    row.oracle_id,
+                    allocation.scryfall_id,
+                    allocation.foil,
+                )] += allocation.quantity
+        elif row.grabbed_quantity > 0:
+            removable_grabbed[(row.oracle_id, None, None)] += row.grabbed_quantity
+    for removal in body.collection_removals:
+        oracle_id = printings[removal.card_scryfall_id].oracle_id
+        removal_key = (
+            oracle_id,
+            removal.printing_scryfall_id,
+            removal.foil,
+        )
+        if removable_grabbed[removal_key] <= 0:
+            raise HTTPException(
+                422,
+                detail="A collection removal must correspond to a grabbed copy in this deck",
+            )
+        removable_grabbed[removal_key] -= 1
+
     existing_by_key: dict[tuple[str, bool, bool], DeckCard] = {}
     for row in existing_rows:
         key = (row.oracle_id, row.is_commander, row.is_sideboard)
@@ -2294,9 +2337,49 @@ def save_deck_draft(
                     )
                     for (status, scryfall_id, foil), quantity in allocation_counts.items()
                 ],
-                add_missing_exact_inventory=body.add_missing_grabbed_to_collection,
             )
             desired_rows[key] = row
+
+        for removal in body.collection_removals:
+            base = printings[removal.card_scryfall_id]
+            candidates = db.query(InventoryLine)
+            if removal.printing_scryfall_id:
+                candidates = candidates.filter(
+                    InventoryLine.scryfall_id == removal.printing_scryfall_id
+                )
+            else:
+                candidates = candidates.join(
+                    CardPrinting,
+                    InventoryLine.scryfall_id == CardPrinting.scryfall_id,
+                ).filter(CardPrinting.oracle_id == base.oracle_id)
+            if removal.foil is not None:
+                candidates = candidates.filter(InventoryLine.foil.is_(removal.foil))
+
+            removed = False
+            for inventory_line in candidates.order_by(InventoryLine.id).all():
+                try:
+                    _validate_inventory_quantity_reduction(
+                        db, inventory_line, inventory_line.quantity - 1
+                    )
+                except HTTPException as exc:
+                    if exc.status_code == 409:
+                        continue
+                    raise
+                if inventory_line.quantity == 1:
+                    db.delete(inventory_line)
+                else:
+                    inventory_line.quantity -= 1
+                db.flush()
+                removed = True
+                break
+            if not removed:
+                raise HTTPException(
+                    409,
+                    detail=(
+                        "No removable collection copy is available for "
+                        f"{base.oracle.name}"
+                    ),
+                )
 
         deck.name = body.name.strip()
         deck.format = body.format

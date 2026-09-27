@@ -239,6 +239,12 @@ def test_aggregate_status_update_preserves_any_printing_compatibility() -> None:
     with SessionLocal() as db:
         _seed_cards(db)
         deck_card = _add_deck_card(db, quantity=2)
+        db.add(InventoryLine(
+            scryfall_id=PRINTING_A,
+            quantity=1,
+            foil=False,
+            language="en",
+        ))
         ensure_deck_card_allocations(db, deck_card)
 
         set_deck_card_status_counts(
@@ -257,6 +263,24 @@ def test_aggregate_status_update_preserves_any_printing_compatibility() -> None:
         assert db.query(InventoryLine).filter(
             InventoryLine.scryfall_id == PRINTING_A
         ).one().quantity == 1
+
+
+def test_aggregate_grabbed_status_requires_an_existing_collection_copy() -> None:
+    with SessionLocal() as db:
+        _seed_cards(db)
+        deck_card = _add_deck_card(db)
+        ensure_deck_card_allocations(db, deck_card)
+
+        with pytest.raises(AllocationError, match="unassigned collection") as error:
+            set_deck_card_status_counts(
+                db,
+                deck_card,
+                grabbed_quantity=1,
+                proxy_quantity=0,
+            )
+
+        assert error.value.status_code == 409
+        assert db.query(InventoryLine).count() == 0
 
 
 def test_exact_grabbed_cannot_overallocate_an_any_grabbed_copy() -> None:

@@ -609,6 +609,12 @@ def test_deck_assembly_tracks_physical_copies_proxies_and_demand(
 ) -> None:
     _add_cached_card()
     with SessionLocal() as db:
+        db.add(InventoryLine(
+            scryfall_id=SCRYFALL_ID,
+            quantity=2,
+            foil=False,
+            language="en",
+        ))
         db.commit()
 
     created = client.post("/api/decks", json={
@@ -628,19 +634,19 @@ def test_deck_assembly_tracks_physical_copies_proxies_and_demand(
     assert grabbed.status_code == 200, grabbed.text
     assert grabbed.json()["id"] == entry["id"]
     assert grabbed.json()["grabbed_quantity"] == 1
-    assert client.get("/api/inventory").json()[0]["quantity"] == 1
+    assert client.get("/api/inventory").json()[0]["quantity"] == 2
 
     locations = client.get(f"/api/cards/{SCRYFALL_ID}/locations").json()
     assert locations == {
         "scryfall_id": SCRYFALL_ID,
         "oracle_id": "00000000-0000-4000-8000-000000000002",
-        "owned_total": 1,
+        "owned_total": 2,
         "grabbed_total": 1,
-        "bulk_total": 0,
+        "bulk_total": 1,
         "pending_total": 1,
         "proxy_total": 0,
         "freely_available": 0,
-        "demand_shortfall": 1,
+        "demand_shortfall": 0,
         "decks": [{
             "deck_id": deck["id"],
             "deck_name": "Allocation test",
@@ -759,6 +765,11 @@ def test_inventory_cannot_remove_assigned_copy_and_clear_releases_assignments(
     client: TestClient,
 ) -> None:
     _add_cached_card()
+    with SessionLocal() as db:
+        db.add(InventoryLine(
+            scryfall_id=SCRYFALL_ID, quantity=1, foil=False, language="en"
+        ))
+        db.commit()
     created = client.post("/api/decks", json={
         "name": "Physical deck",
         "cards": [{"scryfall_id": SCRYFALL_ID}],
@@ -784,6 +795,11 @@ def test_inventory_cannot_remove_assigned_copy_and_clear_releases_assignments(
 
 def test_deleting_deck_returns_grabbed_copy_to_bulk(client: TestClient) -> None:
     _add_cached_card()
+    with SessionLocal() as db:
+        db.add(InventoryLine(
+            scryfall_id=SCRYFALL_ID, quantity=1, foil=False, language="en"
+        ))
+        db.commit()
     created = client.post("/api/decks", json={
         "name": "Temporary deck",
         "cards": [{"scryfall_id": SCRYFALL_ID}],
@@ -882,10 +898,18 @@ def test_deck_draft_save_atomically_replaces_metadata_copies_and_prints(
         assert db.query(DeckInventoryAddition).count() == 1
 
 
-def test_bulk_grabbed_draft_adds_missing_exact_printing_to_collection(
+def test_added_draft_copy_increments_an_existing_collection_printing(
     client: TestClient,
 ) -> None:
     _add_cached_card()
+    with SessionLocal() as db:
+        db.add(InventoryLine(
+            scryfall_id=SCRYFALL_ID,
+            quantity=1,
+            foil=False,
+            language="en",
+        ))
+        db.commit()
     created = client.post("/api/decks", json={
         "name": "New precon",
         "format": "commander",
@@ -895,12 +919,13 @@ def test_bulk_grabbed_draft_adds_missing_exact_printing_to_collection(
         "name": "New precon",
         "format": "commander",
         "status": "building",
-        "add_missing_grabbed_to_collection": True,
         "cards": [{
             "card_scryfall_id": SCRYFALL_ID,
             "printing_scryfall_id": SCRYFALL_ID,
             "status": "grabbed",
             "foil": False,
+            "add_to_collection": True,
+            "collection_addition_id": "10000000-0000-4000-8000-000000000001",
         }],
     }
 
@@ -911,10 +936,91 @@ def test_bulk_grabbed_draft_adds_missing_exact_printing_to_collection(
     inventory = client.get("/api/inventory").json()
     assert len(inventory) == 1
     assert inventory[0]["scryfall_id"] == SCRYFALL_ID
-    assert inventory[0]["quantity"] == 1
+    assert inventory[0]["quantity"] == 2
 
     replayed = client.put(f"/api/decks/{created['id']}/draft", json=draft)
     assert replayed.status_code == 200, replayed.text
+    assert client.get("/api/inventory").json()[0]["quantity"] == 2
+
+
+def test_removing_grabbed_draft_copy_can_remove_it_from_collection(
+    client: TestClient,
+) -> None:
+    _add_cached_card()
+    with SessionLocal() as db:
+        db.add(InventoryLine(
+            scryfall_id=SCRYFALL_ID,
+            quantity=2,
+            foil=False,
+            language="en",
+        ))
+        db.commit()
+    created = client.post("/api/decks", json={
+        "name": "Collection removal",
+        "cards": [{"scryfall_id": SCRYFALL_ID}],
+    }).json()
+    grabbed_draft = {
+        "name": created["name"],
+        "format": created["format"],
+        "status": created["status"],
+        "cards": [{
+            "card_scryfall_id": SCRYFALL_ID,
+            "printing_scryfall_id": SCRYFALL_ID,
+            "status": "grabbed",
+            "foil": False,
+        }],
+    }
+    assert client.put(
+        f"/api/decks/{created['id']}/draft", json=grabbed_draft
+    ).status_code == 200
+
+    removed = client.put(f"/api/decks/{created['id']}/draft", json={
+        "name": created["name"],
+        "format": created["format"],
+        "status": created["status"],
+        "cards": [],
+        "collection_removals": [{
+            "card_scryfall_id": SCRYFALL_ID,
+            "printing_scryfall_id": SCRYFALL_ID,
+            "foil": False,
+        }],
+    })
+
+    assert removed.status_code == 200, removed.text
+    assert removed.json()["cards"] == []
+    assert client.get("/api/inventory").json()[0]["quantity"] == 1
+
+
+def test_removing_grabbed_draft_copy_without_collection_removal_returns_to_bulk(
+    client: TestClient,
+) -> None:
+    _add_cached_card()
+    with SessionLocal() as db:
+        db.add(InventoryLine(
+            scryfall_id=SCRYFALL_ID,
+            quantity=1,
+            foil=False,
+            language="en",
+        ))
+        db.commit()
+    created = client.post("/api/decks", json={
+        "name": "Return to bulk",
+        "cards": [{"scryfall_id": SCRYFALL_ID}],
+    }).json()
+    entry = created["cards"][0]
+    assert client.put(
+        f"/api/decks/{created['id']}/cards/{entry['id']}/assembly",
+        json={"grabbed_quantity": 1, "proxy_quantity": 0},
+    ).status_code == 200
+
+    removed = client.put(f"/api/decks/{created['id']}/draft", json={
+        "name": created["name"],
+        "format": created["format"],
+        "status": created["status"],
+        "cards": [],
+    })
+
+    assert removed.status_code == 200, removed.text
     assert client.get("/api/inventory").json()[0]["quantity"] == 1
 
 
@@ -1050,7 +1156,7 @@ def test_deck_csv_preview_and_card_resolution_do_not_mutate_a_deck(
     assert unchanged["cards"][0]["quantity"] == 1
 
 
-def test_proxy_to_grabbed_does_not_consume_another_decks_earmarked_copy(
+def test_proxy_to_grabbed_cannot_consume_another_decks_earmarked_copy(
     client: TestClient,
 ) -> None:
     _add_cached_card()
@@ -1077,10 +1183,10 @@ def test_proxy_to_grabbed_does_not_consume_another_decks_earmarked_copy(
         f"/api/decks/{proxy_deck['id']}/cards/{proxy_entry['id']}/assembly",
         json={"grabbed_quantity": 1, "proxy_quantity": 0},
     )
-    assert grabbed.status_code == 200, grabbed.text
+    assert grabbed.status_code == 409, grabbed.text
     locations = client.get(f"/api/cards/{SCRYFALL_ID}/locations").json()
-    assert locations["owned_total"] == 2
-    assert locations["grabbed_total"] == 1
+    assert locations["owned_total"] == 1
+    assert locations["grabbed_total"] == 0
     assert locations["pending_total"] == 1
     assert locations["freely_available"] == 0
     assert locations["decks"][0]["deck_id"] == pending_deck["id"]
