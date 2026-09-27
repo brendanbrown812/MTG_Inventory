@@ -827,6 +827,7 @@ export async function saveDeckDraft(
     status: string;
     notes: string | null;
     cards: DeckDraftCopy[];
+    add_missing_grabbed_to_collection?: boolean;
   },
 ): Promise<DeckDetail> {
   const r = await fetch(`${base}/api/decks/${deckId}/draft`, {

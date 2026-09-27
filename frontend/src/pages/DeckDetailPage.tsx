@@ -219,6 +219,7 @@ export default function DeckDetailPage() {
   const [pickList, setPickList] = useState<CardMatch[] | null>(null);
   const [draftCopies, setDraftCopies] = useState<DraftCopy[]>([]);
   const [draftDirty, setDraftDirty] = useState(false);
+  const [addMissingGrabbedToCollection, setAddMissingGrabbedToCollection] = useState(false);
   const [printingEditorKey, setPrintingEditorKey] = useState<string | null>(null);
   const [bulkSetCode, setBulkSetCode] = useState("");
   const [bulkSetBusy, setBulkSetBusy] = useState(false);
@@ -266,6 +267,7 @@ export default function DeckDetailPage() {
       setDraftCopies(copiesFromDeck(d));
       setCommanderId(d.commander_scryfall_id ?? "");
       setDraftDirty(false);
+      setAddMissingGrabbedToCollection(false);
       void refreshAnalysis(d.format);
     } catch (e) {
       setErr(e instanceof Error ? e.message : "Failed to load deck");
@@ -309,11 +311,13 @@ export default function DeckDetailPage() {
           add_to_collection: copy.addToCollection,
           collection_addition_id: copy.collectionAdditionId,
         })),
+        add_missing_grabbed_to_collection: addMissingGrabbedToCollection,
       });
       setDeck(d);
       setDraftCopies(copiesFromDeck(d));
       setCommanderId(d.commander_scryfall_id ?? "");
       setDraftDirty(false);
+      setAddMissingGrabbedToCollection(false);
       void refreshAnalysis(d.format);
     } catch (e) {
       setErr(e instanceof Error ? e.message : "Save failed");
@@ -333,6 +337,7 @@ export default function DeckDetailPage() {
         collectionAdditionId: keepCollectionAddition ? copy.collectionAdditionId : null,
       };
     }));
+    setAddMissingGrabbedToCollection(status === "grabbed");
     setDraftDirty(true);
   }
 
@@ -659,7 +664,7 @@ export default function DeckDetailPage() {
           <div className="mt-4 border-t border-white/10 pt-4">
             <label className="block text-xs text-stone-500">Set every card status</label>
             <p className="mt-1 text-[11px] leading-relaxed text-stone-600">
-              Applies to every main-deck and sideboard copy when you save your changes.
+              Applies to every main-deck and sideboard copy when you save. Grabbed adds any missing selected printings to your collection.
             </p>
             <div className="mt-2 grid grid-cols-3 gap-2">
               <button

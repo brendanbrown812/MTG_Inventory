@@ -882,6 +882,42 @@ def test_deck_draft_save_atomically_replaces_metadata_copies_and_prints(
         assert db.query(DeckInventoryAddition).count() == 1
 
 
+def test_bulk_grabbed_draft_adds_missing_exact_printing_to_collection(
+    client: TestClient,
+) -> None:
+    _add_cached_card()
+    created = client.post("/api/decks", json={
+        "name": "New precon",
+        "format": "commander",
+        "cards": [{"scryfall_id": SCRYFALL_ID}],
+    }).json()
+    draft = {
+        "name": "New precon",
+        "format": "commander",
+        "status": "building",
+        "add_missing_grabbed_to_collection": True,
+        "cards": [{
+            "card_scryfall_id": SCRYFALL_ID,
+            "printing_scryfall_id": SCRYFALL_ID,
+            "status": "grabbed",
+            "foil": False,
+        }],
+    }
+
+    saved = client.put(f"/api/decks/{created['id']}/draft", json=draft)
+
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["cards"][0]["grabbed_quantity"] == 1
+    inventory = client.get("/api/inventory").json()
+    assert len(inventory) == 1
+    assert inventory[0]["scryfall_id"] == SCRYFALL_ID
+    assert inventory[0]["quantity"] == 1
+
+    replayed = client.put(f"/api/decks/{created['id']}/draft", json=draft)
+    assert replayed.status_code == 200, replayed.text
+    assert client.get("/api/inventory").json()[0]["quantity"] == 1
+
+
 def test_invalid_deck_draft_rolls_back_all_card_and_metadata_changes(
     client: TestClient,
 ) -> None:

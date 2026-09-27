@@ -2294,6 +2294,7 @@ def save_deck_draft(
                     )
                     for (status, scryfall_id, foil), quantity in allocation_counts.items()
                 ],
+                add_missing_exact_inventory=body.add_missing_grabbed_to_collection,
             )
             desired_rows[key] = row
 

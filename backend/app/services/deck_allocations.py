@@ -45,14 +45,20 @@ def _owned_oracle_quantity(db: Session, oracle_id: str) -> int:
     )
 
 
-def _merge_inventory_default(db: Session, scryfall_id: str, quantity: int) -> None:
+def _merge_inventory_treatment(
+    db: Session,
+    scryfall_id: str,
+    quantity: int,
+    *,
+    foil: bool,
+) -> None:
     if quantity <= 0:
         return
     existing = (
         db.query(InventoryLine)
         .filter(
             InventoryLine.scryfall_id == scryfall_id,
-            InventoryLine.foil.is_(False),
+            InventoryLine.foil.is_(foil),
             InventoryLine.condition.is_(None),
             InventoryLine.language == "en",
         )
@@ -64,11 +70,15 @@ def _merge_inventory_default(db: Session, scryfall_id: str, quantity: int) -> No
         db.add(InventoryLine(
             scryfall_id=scryfall_id,
             quantity=quantity,
-            foil=False,
+            foil=foil,
             condition=None,
             language="en",
         ))
     db.flush()
+
+
+def _merge_inventory_default(db: Session, scryfall_id: str, quantity: int) -> None:
+    _merge_inventory_treatment(db, scryfall_id, quantity, foil=False)
 
 
 def ensure_deck_card_allocations(db: Session, deck_card: DeckCard) -> None:
@@ -201,6 +211,8 @@ def _reconcile_grabbed_inventory(
     db: Session,
     deck_card: DeckCard,
     specs: list[AllocationSpec],
+    *,
+    add_missing_exact_inventory: bool = False,
 ) -> None:
     exact_target: Counter[str] = Counter()
     treatment_target: Counter[tuple[str, bool]] = Counter()
@@ -213,25 +225,6 @@ def _reconcile_grabbed_inventory(
             exact_target[spec.scryfall_id] += spec.quantity
             if spec.foil is not None:
                 treatment_target[(spec.scryfall_id, spec.foil)] += spec.quantity
-
-    for scryfall_id, target_quantity in exact_target.items():
-        other_exact = int(
-            db.query(func.coalesce(func.sum(DeckCardAllocation.quantity), 0))
-            .filter(
-                DeckCardAllocation.deck_card_id != deck_card.id,
-                DeckCardAllocation.scryfall_id == scryfall_id,
-                DeckCardAllocation.status == "grabbed",
-            )
-            .scalar()
-            or 0
-        )
-        owned = _owned_printing_quantity(db, scryfall_id)
-        if other_exact + target_quantity > owned:
-            raise AllocationError(
-                f"That printing has {owned} owned copy/copies, with {other_exact} "
-                "already assigned to other decks",
-                status_code=409,
-            )
 
     for (scryfall_id, foil), target_quantity in treatment_target.items():
         other_treatment = int(
@@ -255,12 +248,44 @@ def _reconcile_grabbed_inventory(
             or 0
         )
         if other_treatment + target_quantity > owned_treatment:
-            label = "foil" if foil else "nonfoil"
-            raise AllocationError(
-                f"That printing has {owned_treatment} owned {label} copy/copies, "
-                f"with {other_treatment} already assigned to other decks",
-                status_code=409,
+            if add_missing_exact_inventory:
+                _merge_inventory_treatment(
+                    db,
+                    scryfall_id,
+                    other_treatment + target_quantity - owned_treatment,
+                    foil=foil,
+                )
+            else:
+                label = "foil" if foil else "nonfoil"
+                raise AllocationError(
+                    f"That printing has {owned_treatment} owned {label} copy/copies, "
+                    f"with {other_treatment} already assigned to other decks",
+                    status_code=409,
+                )
+
+    for scryfall_id, target_quantity in exact_target.items():
+        other_exact = int(
+            db.query(func.coalesce(func.sum(DeckCardAllocation.quantity), 0))
+            .filter(
+                DeckCardAllocation.deck_card_id != deck_card.id,
+                DeckCardAllocation.scryfall_id == scryfall_id,
+                DeckCardAllocation.status == "grabbed",
             )
+            .scalar()
+            or 0
+        )
+        owned = _owned_printing_quantity(db, scryfall_id)
+        if other_exact + target_quantity > owned:
+            if add_missing_exact_inventory:
+                _merge_inventory_default(
+                    db, scryfall_id, other_exact + target_quantity - owned
+                )
+            else:
+                raise AllocationError(
+                    f"That printing has {owned} owned copy/copies, with {other_exact} "
+                    "already assigned to other decks",
+                    status_code=409,
+                )
 
     current_rows = db.query(DeckCardAllocation).filter(
         DeckCardAllocation.deck_card_id == deck_card.id
@@ -324,20 +349,34 @@ def _reconcile_grabbed_inventory(
     )
     owned_after_reconcile = _owned_oracle_quantity(db, deck_card.oracle_id)
     if other_grabbed + target_grabbed > owned_after_reconcile:
-        raise AllocationError(
-            f"This card has {owned_after_reconcile} owned copy/copies, with "
-            f"{other_grabbed} already grabbed in other decks",
-            status_code=409,
-        )
+        if add_missing_exact_inventory and target_grabbed > 0:
+            _merge_inventory_default(
+                db,
+                deck_card.scryfall_id,
+                other_grabbed + target_grabbed - owned_after_reconcile,
+            )
+        else:
+            raise AllocationError(
+                f"This card has {owned_after_reconcile} owned copy/copies, with "
+                f"{other_grabbed} already grabbed in other decks",
+                status_code=409,
+            )
 
 
 def replace_deck_card_allocations(
     db: Session,
     deck_card: DeckCard,
     specs: list[AllocationSpec],
+    *,
+    add_missing_exact_inventory: bool = False,
 ) -> None:
     normalized = _validate_specs(db, deck_card, specs)
-    _reconcile_grabbed_inventory(db, deck_card, normalized)
+    _reconcile_grabbed_inventory(
+        db,
+        deck_card,
+        normalized,
+        add_missing_exact_inventory=add_missing_exact_inventory,
+    )
 
     for row in db.query(DeckCardAllocation).filter(
         DeckCardAllocation.deck_card_id == deck_card.id
