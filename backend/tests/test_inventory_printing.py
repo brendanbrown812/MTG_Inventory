@@ -131,6 +131,38 @@ def test_scryfall_print_search_follows_every_page(monkeypatch: pytest.MonkeyPatc
     assert requested == [first_url, second_url]
 
 
+def test_scryfall_set_search_follows_every_page(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = ScryfallClient()
+    first_url = f"{client.base}/cards/search"
+    second_url = f"{client.base}/cards/search?q=set%3Ascd&page=2"
+    requested: list[tuple[str, dict | None]] = []
+
+    def fake_request(_method: str, url: str, **kwargs) -> httpx.Response:
+        requested.append((url, kwargs.get("params")))
+        request = httpx.Request("GET", url)
+        if url == first_url:
+            return httpx.Response(200, request=request, json={
+                "data": [{"id": SOURCE_ID}],
+                "has_more": True,
+                "next_page": second_url,
+            })
+        return httpx.Response(200, request=request, json={
+            "data": [{"id": TARGET_ID}],
+            "has_more": False,
+        })
+
+    monkeypatch.setattr(client, "_request", fake_request)
+
+    assert [row["id"] for row in client.fetch_cards_in_set("SCD")] == [
+        SOURCE_ID,
+        TARGET_ID,
+    ]
+    assert requested == [
+        (first_url, {"order": "set", "q": "set:scd", "unique": "prints"}),
+        (second_url, None),
+    ]
+
+
 def test_print_options_preserve_duplicate_set_names_and_shape(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,

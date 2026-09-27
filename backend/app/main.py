@@ -41,6 +41,9 @@ from app.enrichment.pricing import estimate_cost, get_model_prices
 from app.enrichment.registry import build_enrichment_provider, provider_is_configured
 from app.mechanics.profile import PROFILE_SCHEMA_VERSION, TAXONOMY_VERSION
 from app.schemas import (
+    BulkSetPrintingMatchOut,
+    BulkSetPrintingRequest,
+    BulkSetPrintingResultOut,
     CardResolveMatch,
     CardResolveOut,
     ClearInventoryResult,
@@ -1109,6 +1112,56 @@ def card_print_options(
             nonfoil=bool(payload.get("nonfoil")),
         ))
     return output
+
+
+@app.post("/api/printings/by-set", response_model=BulkSetPrintingResultOut)
+def bulk_printings_by_set(
+    body: BulkSetPrintingRequest,
+    db: Annotated[Session, Depends(get_db)],
+):
+    """Resolve Oracle cards to deterministic printings from one set."""
+    set_code = body.set_code.strip().lower()
+    requested = list(dict.fromkeys(body.oracle_ids))
+    requested_set = set(requested)
+    try:
+        payloads = ScryfallClient().fetch_cards_in_set(set_code)
+    except (httpx.HTTPError, ValueError) as exc:
+        _log.warning("Could not load Scryfall set code=%s error=%s", set_code, exc)
+        raise HTTPException(502, detail=f"Could not load set {set_code.upper()} from Scryfall") from exc
+
+    choices: dict[str, dict] = {}
+    for payload in payloads:
+        oracle_id = payload.get("oracle_id")
+        if oracle_id not in requested_set or not payload.get("id"):
+            continue
+        current = choices.get(oracle_id)
+        # Prefer English when Scryfall returns multiple language printings,
+        # then retain the API's deterministic collector ordering.
+        if current is None or (
+            current.get("lang") != "en" and payload.get("lang") == "en"
+        ):
+            choices[oracle_id] = payload
+
+    matches = []
+    client = ScryfallClient()
+    for oracle_id in requested:
+        payload = choices.get(oracle_id)
+        if payload is None:
+            continue
+        printing = client.upsert_cache_from_scryfall(db, payload, commit=False)
+        db.flush()
+        matches.append(BulkSetPrintingMatchOut(
+            oracle_id=oracle_id,
+            printing=printing,
+            foil=bool(payload.get("foil")),
+            nonfoil=bool(payload.get("nonfoil")),
+        ))
+    db.commit()
+    return BulkSetPrintingResultOut(
+        set_code=set_code.upper(),
+        matches=matches,
+        missing_oracle_ids=[oracle_id for oracle_id in requested if oracle_id not in choices],
+    )
 
 
 @app.put(

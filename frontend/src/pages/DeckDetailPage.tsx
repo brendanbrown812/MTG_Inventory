@@ -3,6 +3,7 @@ import { Link, useBlocker, useParams } from "react-router-dom";
 import {
   deleteDeck,
   downloadDeckBackup,
+  fetchBulkSetPrintings,
   fetchDeck,
   fetchDeckAnalysis,
   previewDeckCsv,
@@ -219,6 +220,13 @@ export default function DeckDetailPage() {
   const [draftCopies, setDraftCopies] = useState<DraftCopy[]>([]);
   const [draftDirty, setDraftDirty] = useState(false);
   const [printingEditorKey, setPrintingEditorKey] = useState<string | null>(null);
+  const [bulkSetCode, setBulkSetCode] = useState("");
+  const [bulkSetBusy, setBulkSetBusy] = useState(false);
+  const [bulkSetResult, setBulkSetResult] = useState<{
+    setCode: string;
+    changedCopies: number;
+    missingNames: string[];
+  } | null>(null);
   const nextDraftKey = useRef(1);
   const allowHardNavigation = useRef(false);
   const navigationBlocker = useBlocker(({ currentLocation, nextLocation }) => (
@@ -361,6 +369,56 @@ export default function DeckDetailPage() {
       setErr(e instanceof Error ? e.message : "Could not resolve card name");
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function applySetPrintings() {
+    const setCode = bulkSetCode.trim();
+    if (!setCode || draftCopies.length === 0) return;
+    if (!window.confirm(
+      `Set every available deck card to its ${setCode.toUpperCase()} printing? Cards not printed in that set will stay unchanged.`,
+    )) return;
+    setBulkSetBusy(true);
+    setBulkSetResult(null);
+    setErr(null);
+    try {
+      const oracleIds = [...new Set(draftCopies.map((copy) => copy.card.oracle_id))];
+      const result = await fetchBulkSetPrintings(setCode, oracleIds);
+      const matches = new Map(result.matches.map((match) => [match.oracle_id, match]));
+      const changedCopies = draftCopies.filter((copy) => matches.has(copy.card.oracle_id)).length;
+      setDraftCopies((previous) => previous.map((copy) => {
+        const match = matches.get(copy.card.oracle_id);
+        if (!match) return copy;
+        let foil = copy.foil;
+        if (foil === true && !match.foil) foil = match.nonfoil ? false : null;
+        else if (foil === false && !match.nonfoil) foil = match.foil ? true : null;
+        else if (foil === null && match.foil !== match.nonfoil) foil = match.foil;
+        return {
+          ...copy,
+          printingScryfallId: match.printing.scryfall_id,
+          printing: match.printing,
+          foil,
+          addToCollection: false,
+          collectionAdditionId: null,
+        };
+      }));
+      const namesByOracle = new Map(
+        draftCopies.map((copy) => [copy.card.oracle_id, copy.card.name]),
+      );
+      const missingNames = result.missing_oracle_ids
+        .map((oracleId) => namesByOracle.get(oracleId) ?? oracleId)
+        .sort((left, right) => left.localeCompare(right));
+      const commanderMatch = draftCopies
+        .filter((copy) => copy.isCommander)
+        .map((copy) => matches.get(copy.card.oracle_id))
+        .find((match) => match !== undefined);
+      if (commanderMatch) setCommanderId(commanderMatch.printing.scryfall_id);
+      setBulkSetResult({ setCode: result.set_code, changedCopies, missingNames });
+      if (changedCopies > 0) setDraftDirty(true);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "Could not apply set printings");
+    } finally {
+      setBulkSetBusy(false);
     }
   }
 
@@ -584,6 +642,52 @@ export default function DeckDetailPage() {
             rows={3}
             className="mt-1 w-full rounded-xl border border-white/10 bg-ink-950/60 px-3 py-2 text-sm"
           />
+          <div className="mt-4 border-t border-white/10 pt-4">
+            <label className="block text-xs text-stone-500">Set every available printing</label>
+            <p className="mt-1 text-[11px] leading-relaxed text-stone-600">
+              Enter a set code such as SCD. Cards without a printing in that set are left unchanged.
+            </p>
+            <div className="mt-2 flex gap-2">
+              <input
+                value={bulkSetCode}
+                onChange={(event) => {
+                  setBulkSetCode(event.target.value.toUpperCase());
+                  setBulkSetResult(null);
+                }}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") void applySetPrintings();
+                }}
+                maxLength={8}
+                placeholder="SCD"
+                className="min-w-0 flex-1 rounded-xl border border-white/10 bg-ink-950/60 px-3 py-2 font-mono text-sm uppercase"
+              />
+              <button
+                type="button"
+                disabled={bulkSetBusy || !bulkSetCode.trim() || draftCopies.length === 0}
+                onClick={() => void applySetPrintings()}
+                className="rounded-xl bg-arcane-500/15 px-3 py-2 text-xs font-medium text-arcane-100 ring-1 ring-arcane-400/25 disabled:opacity-40"
+              >
+                {bulkSetBusy ? "Applying…" : "Apply"}
+              </button>
+            </div>
+            {bulkSetResult && (
+              <div className="mt-3 rounded-xl border border-white/10 bg-ink-950/40 p-3 text-xs">
+                <p className="text-emerald-300">
+                  Set {bulkSetResult.changedCopies} {bulkSetResult.changedCopies === 1 ? "copy" : "copies"} to {bulkSetResult.setCode}.
+                </p>
+                {bulkSetResult.missingNames.length > 0 && (
+                  <details className="mt-2 text-amber-300">
+                    <summary className="cursor-pointer">
+                      {bulkSetResult.missingNames.length} {bulkSetResult.missingNames.length === 1 ? "card has" : "cards have"} no {bulkSetResult.setCode} printing
+                    </summary>
+                    <ul className="mt-2 max-h-36 space-y-1 overflow-y-auto border-l border-amber-500/20 pl-3 text-stone-400">
+                      {bulkSetResult.missingNames.map((name) => <li key={name}>{name}</li>)}
+                    </ul>
+                  </details>
+                )}
+              </div>
+            )}
+          </div>
           <button
             type="button"
             disabled={busy || !deck.name.trim() || !draftDirty}

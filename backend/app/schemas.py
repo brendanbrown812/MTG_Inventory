@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -375,6 +375,27 @@ class PrintingOptionOut(BaseModel):
     image_uri_normal: str | None = None
     foil: bool = False
     nonfoil: bool = False
+
+
+class BulkSetPrintingRequest(BaseModel):
+    set_code: str = Field(min_length=2, max_length=8, pattern=r"^[A-Za-z0-9]+$")
+    oracle_ids: list[Annotated[str, Field(min_length=36, max_length=36)]] = Field(
+        min_length=1,
+        max_length=1_000,
+    )
+
+
+class BulkSetPrintingMatchOut(BaseModel):
+    oracle_id: str
+    printing: CardOut
+    foil: bool
+    nonfoil: bool
+
+
+class BulkSetPrintingResultOut(BaseModel):
+    set_code: str
+    matches: list[BulkSetPrintingMatchOut]
+    missing_oracle_ids: list[str]
 
 
 class InventoryPrintingChange(BaseModel):

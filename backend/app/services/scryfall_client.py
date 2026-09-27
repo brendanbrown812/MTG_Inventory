@@ -155,6 +155,38 @@ class ScryfallClient:
             next_url = page.get("next_page") if page.get("has_more") else None
         return output
 
+    def fetch_cards_in_set(self, set_code: str) -> list[dict]:
+        """Fetch every unique printing in one Scryfall set."""
+        next_url = f"{self.base}/cards/search"
+        first_params: dict | None = {
+            "order": "set",
+            "q": f"set:{set_code.strip().lower()}",
+            "unique": "prints",
+        }
+        allowed = urlparse(self.base)
+        output: list[dict] = []
+        seen_urls: set[str] = set()
+        while next_url:
+            if len(seen_urls) >= 100:
+                raise ValueError("Scryfall set pagination exceeded 100 pages")
+            parsed = urlparse(next_url)
+            if parsed.scheme != allowed.scheme or parsed.netloc != allowed.netloc:
+                raise ValueError("Scryfall returned an unexpected set-search URL")
+            if next_url in seen_urls:
+                raise ValueError("Scryfall set pagination repeated a page")
+            seen_urls.add(next_url)
+            response = self._request("GET", next_url, params=first_params)
+            first_params = None
+            if response.status_code == 404:
+                return []
+            response.raise_for_status()
+            page = response.json()
+            output.extend(page.get("data") or [])
+            if len(output) > 10_000:
+                raise ValueError("Scryfall returned too many cards for one set")
+            next_url = page.get("next_page") if page.get("has_more") else None
+        return output
+
     def fetch_named(self, name: str, *, exact: bool = True) -> dict | None:
         param = "exact" if exact else "fuzzy"
         r = self._request("GET", f"{self.base}/cards/named", params={param: name})

@@ -389,6 +389,31 @@ export type PrintingOption = {
   nonfoil: boolean;
 };
 
+export type BulkSetPrintingResult = {
+  set_code: string;
+  matches: Array<{
+    oracle_id: string;
+    printing: Card;
+    foil: boolean;
+    nonfoil: boolean;
+  }>;
+  missing_oracle_ids: string[];
+};
+
+export async function fetchBulkSetPrintings(
+  setCode: string,
+  oracleIds: string[],
+): Promise<BulkSetPrintingResult> {
+  const r = await fetch(`${base}/api/printings/by-set`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ set_code: setCode, oracle_ids: oracleIds }),
+  });
+  const payload = await r.json().catch(() => null) as { detail?: string } | null;
+  if (!r.ok) throw new Error(payload?.detail ?? `Could not load set ${setCode.toUpperCase()}`);
+  return payload as BulkSetPrintingResult;
+}
+
 export type InventoryPrintingChangeResult = {
   changed_lines: number;
   moved_quantity: number;
