@@ -137,6 +137,13 @@ function AnalysisPanel({ analysis, loading }: { analysis: DeckAnalysis | null; l
 
 type DraftStatus = "pending" | "grabbed" | "proxy";
 type DraftAction = DraftStatus | "added";
+type DeckSortMode = "name" | "type" | "color";
+
+const COLOR_ORDER = ["W", "U", "B", "R", "G"];
+const TYPE_ORDER = [
+  "Legendary Creature", "Creature", "Planeswalker", "Instant", "Sorcery",
+  "Artifact", "Enchantment", "Battle", "Land", "Other",
+];
 
 type DraftCopy = {
   key: string;
@@ -160,6 +167,46 @@ type DraftCollectionRemoval = {
   printing_scryfall_id: string | null;
   foil: boolean | null;
 };
+
+function normalizedColors(raw: string): string[] {
+  const values = raw.trim().startsWith("[")
+    ? (() => {
+        try { return JSON.parse(raw) as unknown; } catch { return []; }
+      })()
+    : raw.split(",");
+  return Array.isArray(values)
+    ? values.map(String).map((value) => value.trim().toUpperCase()).filter((value) => COLOR_ORDER.includes(value))
+    : [];
+}
+
+function draftColorSortKey(copy: DraftCopy): number {
+  const colors = normalizedColors(copy.card.colors);
+  if (colors.length === 1) return COLOR_ORDER.indexOf(colors[0] ?? "");
+  if (colors.length > 1) return COLOR_ORDER.length;
+  return COLOR_ORDER.length + 1;
+}
+
+function draftTypeCategory(copy: DraftCopy): string {
+  const typeLine = copy.card.type_line ?? "";
+  if (typeLine.includes("Legendary") && typeLine.includes("Creature")) return "Legendary Creature";
+  if (typeLine.includes("Creature")) return "Creature";
+  for (const category of TYPE_ORDER.slice(2, -1)) {
+    if (typeLine.includes(category)) return category;
+  }
+  return "Other";
+}
+
+function sortedDraftCopies(copies: DraftCopy[], mode: DeckSortMode): DraftCopy[] {
+  return [...copies].sort((left, right) => {
+    const primary = mode === "color"
+      ? draftColorSortKey(left) - draftColorSortKey(right)
+      : mode === "type"
+        ? TYPE_ORDER.indexOf(draftTypeCategory(left)) - TYPE_ORDER.indexOf(draftTypeCategory(right))
+        : 0;
+    const manaValue = mode === "type" ? left.card.cmc - right.card.cmc : 0;
+    return primary || manaValue || left.card.name.localeCompare(right.card.name) || left.key.localeCompare(right.key);
+  });
+}
 
 function copiesFromDeck(deck: DeckDetail): DraftCopy[] {
   return deck.cards.flatMap((entry) => {
@@ -232,6 +279,10 @@ export default function DeckDetailPage() {
   const [pickList, setPickList] = useState<CardMatch[] | null>(null);
   const [draftCopies, setDraftCopies] = useState<DraftCopy[]>([]);
   const [draftDirty, setDraftDirty] = useState(false);
+  const [sortMode, setSortMode] = useState<DeckSortMode>(() => {
+    const saved = localStorage.getItem("spellbinder:deck-detail:sort");
+    return saved === "type" || saved === "color" ? saved : "name";
+  });
   const [collectionRemovals, setCollectionRemovals] = useState<DraftCollectionRemoval[]>([]);
   const [removalPrompt, setRemovalPrompt] = useState<DraftCopy | null>(null);
   const [printingEditorKey, setPrintingEditorKey] = useState<string | null>(null);
@@ -295,6 +346,10 @@ export default function DeckDetailPage() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  useEffect(() => {
+    localStorage.setItem("spellbinder:deck-detail:sort", sortMode);
+  }, [sortMode]);
 
   useEffect(() => {
     if (!draftDirty) return;
@@ -587,7 +642,7 @@ export default function DeckDetailPage() {
   if (loading) return <p className="text-stone-500">Loading deck…</p>;
   if (!deck) return <p className="text-stone-500">Deck not found.</p>;
 
-  const cards = [...draftCopies].sort((a, b) => a.card.name.localeCompare(b.card.name));
+  const cards = sortedDraftCopies(draftCopies, sortMode);
   const selectedDraftCopy = draftCopies.find((copy) => copy.key === printingEditorKey) ?? null;
   const selectedModalCard: DeckCard | null = selectedDraftCopy ? {
     id: -1,
@@ -945,9 +1000,23 @@ export default function DeckDetailPage() {
           </details>
 
           <div>
-            <div className="flex items-baseline justify-between gap-3">
+            <div className="flex flex-wrap items-end justify-between gap-3">
               <h3 className="font-display text-2xl text-stone-100">Main list</h3>
-              <span className="text-sm text-stone-500">{cards.length} cards</span>
+              <div className="flex items-center gap-3">
+                <span className="text-sm text-stone-500">{cards.length} cards</span>
+                <label className="text-xs font-medium uppercase tracking-wider text-stone-500">
+                  Sort
+                  <select
+                    value={sortMode}
+                    onChange={(event) => setSortMode(event.target.value as DeckSortMode)}
+                    className="ml-2 rounded-lg border border-white/10 bg-ink-800 px-3 py-2 text-xs normal-case tracking-normal text-stone-300"
+                  >
+                    <option value="name">Alphabetical</option>
+                    <option value="type">Card type</option>
+                    <option value="color">Color · WUBRG</option>
+                  </select>
+                </label>
+              </div>
             </div>
             {cards.length === 0 ? (
               <div className="mt-3 rounded-2xl border border-dashed border-white/10 px-6 py-10 text-center text-sm text-stone-500">
