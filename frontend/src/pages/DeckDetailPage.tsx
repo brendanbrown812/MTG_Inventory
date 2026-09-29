@@ -1163,7 +1163,9 @@ export default function DeckDetailPage() {
                             <span className="flex h-full items-center justify-center p-3 text-xs text-stone-500">{copy.card.name}</span>
                           )}
                           {copy.isCommander && <span className="absolute left-2 top-2 rounded-full bg-black/80 px-2 py-1 text-[10px] font-semibold text-arcane-200">Commander</span>}
-                          <span className="absolute right-2 top-2 rounded-full bg-black/80 px-2 py-1 text-xs font-bold text-stone-100">×{copyGroup.copies.length}</span>
+                          {copyGroup.copies.length > 1 && (
+                            <span className="absolute right-2 top-2 rounded-full bg-black/80 px-2 py-1 text-xs font-bold text-stone-100">×{copyGroup.copies.length}</span>
+                          )}
                           {allAdded && <span className="absolute bottom-2 left-2 rounded-full bg-sky-950/90 px-2 py-1 text-[10px] font-semibold text-sky-200">New collection copies</span>}
                         </button>
                       </CardHoverPreview>
