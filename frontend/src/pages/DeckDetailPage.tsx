@@ -220,6 +220,11 @@ function draftTypeCategory(copy: DraftCopy): string {
   return "Other";
 }
 
+function adjustedManaValue(copy: DraftCopy): number {
+  const variableSymbols = copy.card.mana_cost?.match(/\{X\}/gi)?.length ?? 0;
+  return copy.card.cmc + variableSymbols;
+}
+
 function sortedDraftCopies(copies: DraftCopy[], mode: DeckSortMode): DraftCopy[] {
   return [...copies].sort((left, right) => {
     const primary = mode === "color"
@@ -227,7 +232,7 @@ function sortedDraftCopies(copies: DraftCopy[], mode: DeckSortMode): DraftCopy[]
       : mode === "type"
         ? TYPE_ORDER.indexOf(draftTypeCategory(left)) - TYPE_ORDER.indexOf(draftTypeCategory(right))
         : 0;
-    const manaValue = mode === "type" ? left.card.cmc - right.card.cmc : 0;
+    const manaValue = mode === "type" ? adjustedManaValue(left) - adjustedManaValue(right) : 0;
     return primary || manaValue || left.card.name.localeCompare(right.card.name) || left.key.localeCompare(right.key);
   });
 }
