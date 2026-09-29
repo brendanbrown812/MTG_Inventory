@@ -144,6 +144,18 @@ const TYPE_ORDER = [
   "Legendary Creature", "Creature", "Planeswalker", "Instant", "Sorcery",
   "Artifact", "Enchantment", "Battle", "Land", "Other",
 ];
+const TYPE_SECTION_LABELS: Record<string, string> = {
+  "Legendary Creature": "Legendary Creatures",
+  Creature: "Creatures",
+  Planeswalker: "Planeswalkers",
+  Instant: "Instants",
+  Sorcery: "Sorceries",
+  Artifact: "Artifacts",
+  Enchantment: "Enchantments",
+  Battle: "Battles",
+  Land: "Lands",
+  Other: "Other",
+};
 
 type DraftCopy = {
   key: string;
@@ -643,6 +655,13 @@ export default function DeckDetailPage() {
   if (!deck) return <p className="text-stone-500">Deck not found.</p>;
 
   const cards = sortedDraftCopies(draftCopies, sortMode);
+  const cardGroups = sortMode === "type"
+    ? TYPE_ORDER.map((category) => ({
+        key: category,
+        label: TYPE_SECTION_LABELS[category] ?? category,
+        copies: cards.filter((copy) => draftTypeCategory(copy) === category),
+      })).filter((group) => group.copies.length > 0)
+    : [{ key: "all", label: null, copies: cards }];
   const selectedDraftCopy = draftCopies.find((copy) => copy.key === printingEditorKey) ?? null;
   const selectedModalCard: DeckCard | null = selectedDraftCopy ? {
     id: -1,
@@ -1023,8 +1042,17 @@ export default function DeckDetailPage() {
                 No cards — stage cards from the section above.
               </div>
             ) : (
-              <div className="mt-3 grid grid-cols-[repeat(auto-fill,minmax(155px,1fr))] gap-3 sm:grid-cols-[repeat(auto-fill,minmax(175px,1fr))] 2xl:grid-cols-[repeat(auto-fill,minmax(190px,1fr))]">
-                {cards.map((copy) => {
+              <div className="mt-3 space-y-6">
+                {cardGroups.map((group) => (
+                  <section key={group.key}>
+                    {group.label && (
+                      <div className="flex items-center gap-3 border-b border-white/10 pb-2">
+                        <h4 className="text-xs font-semibold uppercase tracking-[0.18em] text-stone-300">{group.label}</h4>
+                        <span className="text-xs text-stone-600">{group.copies.length}</span>
+                      </div>
+                    )}
+                    <div className={`${group.label ? "mt-3 " : ""}grid grid-cols-[repeat(auto-fill,minmax(155px,1fr))] gap-3 sm:grid-cols-[repeat(auto-fill,minmax(175px,1fr))] 2xl:grid-cols-[repeat(auto-fill,minmax(190px,1fr))]`}>
+                {group.copies.map((copy) => {
                   const displayed = copy.printing ?? copy.card;
                   return (
                     <article key={copy.key} className={`overflow-hidden rounded-xl border bg-ink-900/65 shadow-card ${
@@ -1099,6 +1127,9 @@ export default function DeckDetailPage() {
                     </article>
                   );
                 })}
+                    </div>
+                  </section>
+                ))}
               </div>
             )}
           </div>
