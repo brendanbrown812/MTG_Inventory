@@ -174,6 +174,18 @@ type DraftCopy = {
   persistedFoil: boolean | null;
 };
 
+type DraftCopyGroup = {
+  key: string;
+  copies: DraftCopy[];
+  representative: DraftCopy;
+};
+
+type QuantityActionPrompt = {
+  group: DraftCopyGroup;
+  action: DraftAction;
+  quantity: string;
+};
+
 type DraftCollectionRemoval = {
   card_scryfall_id: string;
   printing_scryfall_id: string | null;
@@ -217,6 +229,48 @@ function sortedDraftCopies(copies: DraftCopy[], mode: DeckSortMode): DraftCopy[]
         : 0;
     const manaValue = mode === "type" ? left.card.cmc - right.card.cmc : 0;
     return primary || manaValue || left.card.name.localeCompare(right.card.name) || left.key.localeCompare(right.key);
+  });
+}
+
+function draftCopyBaseGroupKey(copy: DraftCopy): string {
+  return `${copy.card.oracle_id}:${copy.isCommander ? "commander" : copy.isSideboard ? "sideboard" : "main"}`;
+}
+
+function draftCopyAction(copy: DraftCopy): DraftAction {
+  return copy.addToCollection ? "added" : copy.status;
+}
+
+function draftActionLabel(action: DraftAction): string {
+  if (action === "pending") return "Need";
+  if (action === "proxy") return "Proxied";
+  return action[0]?.toUpperCase() + action.slice(1);
+}
+
+function draftCopyGroupKey(copy: DraftCopy): string {
+  return `${draftCopyBaseGroupKey(copy)}:${draftCopyAction(copy)}`;
+}
+
+function groupedDraftCopies(copies: DraftCopy[]): DraftCopyGroup[] {
+  const groups = new Map<string, DraftCopyGroup>();
+  const baseOrder = new Map<string, number>();
+  for (const copy of copies) {
+    const baseKey = draftCopyBaseGroupKey(copy);
+    if (!baseOrder.has(baseKey)) baseOrder.set(baseKey, baseOrder.size);
+    const key = draftCopyGroupKey(copy);
+    const existing = groups.get(key);
+    if (existing) {
+      existing.copies.push(copy);
+    } else {
+      groups.set(key, { key, copies: [copy], representative: copy });
+    }
+  }
+  const actionOrder: DraftAction[] = ["pending", "grabbed", "proxy", "added"];
+  return [...groups.values()].sort((left, right) => {
+    const leftBase = baseOrder.get(draftCopyBaseGroupKey(left.representative)) ?? 0;
+    const rightBase = baseOrder.get(draftCopyBaseGroupKey(right.representative)) ?? 0;
+    return leftBase - rightBase
+      || actionOrder.indexOf(draftCopyAction(left.representative))
+        - actionOrder.indexOf(draftCopyAction(right.representative));
   });
 }
 
@@ -296,7 +350,8 @@ export default function DeckDetailPage() {
     return saved === "type" || saved === "color" ? saved : "name";
   });
   const [collectionRemovals, setCollectionRemovals] = useState<DraftCollectionRemoval[]>([]);
-  const [removalPrompt, setRemovalPrompt] = useState<DraftCopy | null>(null);
+  const [removalPrompt, setRemovalPrompt] = useState<DraftCopyGroup | null>(null);
+  const [quantityActionPrompt, setQuantityActionPrompt] = useState<QuantityActionPrompt | null>(null);
   const [printingEditorKey, setPrintingEditorKey] = useState<string | null>(null);
   const [bulkSetCode, setBulkSetCode] = useState("");
   const [bulkSetBusy, setBulkSetBusy] = useState(false);
@@ -346,6 +401,7 @@ export default function DeckDetailPage() {
       setDraftDirty(false);
       setCollectionRemovals([]);
       setRemovalPrompt(null);
+      setQuantityActionPrompt(null);
       void refreshAnalysis(d.format);
     } catch (e) {
       setErr(e instanceof Error ? e.message : "Failed to load deck");
@@ -401,6 +457,7 @@ export default function DeckDetailPage() {
       setDraftDirty(false);
       setCollectionRemovals([]);
       setRemovalPrompt(null);
+      setQuantityActionPrompt(null);
       void refreshAnalysis(d.format);
     } catch (e) {
       setErr(e instanceof Error ? e.message : "Save failed");
@@ -435,6 +492,26 @@ export default function DeckDetailPage() {
     if (draftCopies.length === 0) return;
     setDraftCopies((previous) => previous.map((copy) => applyDraftAction(copy, action)));
     setDraftDirty(true);
+  }
+
+  function applyActionToGroup(group: DraftCopyGroup, action: DraftAction, quantity: number) {
+    const selectedKeys = new Set(
+      group.copies.slice(0, Math.max(0, Math.min(quantity, group.copies.length))).map((copy) => copy.key),
+    );
+    if (selectedKeys.size === 0) return;
+    setDraftCopies((previous) => previous.map((copy) => (
+      selectedKeys.has(copy.key) ? applyDraftAction(copy, action) : copy
+    )));
+    setQuantityActionPrompt(null);
+    setDraftDirty(true);
+  }
+
+  function requestGroupAction(group: DraftCopyGroup, action: DraftAction) {
+    if (group.copies.length === 1) {
+      applyActionToGroup(group, action, 1);
+      return;
+    }
+    setQuantityActionPrompt({ group, action, quantity: "1" });
   }
 
   function stageCard(card: CardMatch) {
@@ -602,20 +679,20 @@ export default function DeckDetailPage() {
     }
   }
 
-  function removeCopy(key: string, removeFromCollection = false) {
-    const removed = draftCopies.find((copy) => copy.key === key);
-    if (removed && removeFromCollection) {
-      setCollectionRemovals((previous) => [
-        ...previous,
-        {
-          card_scryfall_id: removed.cardScryfallId,
-          printing_scryfall_id: removed.persistedPrintingScryfallId,
-          foil: removed.persistedFoil,
-        },
-      ]);
+  function removeCopies(group: DraftCopyGroup, removeFromCollection = false) {
+    const keys = new Set(group.copies.map((copy) => copy.key));
+    if (removeFromCollection) {
+      const removals = group.copies
+        .filter((copy) => copy.status === "grabbed" && copy.persistedGrabbed && !copy.addToCollection)
+        .map((copy) => ({
+          card_scryfall_id: copy.cardScryfallId,
+          printing_scryfall_id: copy.persistedPrintingScryfallId,
+          foil: copy.persistedFoil,
+        }));
+      setCollectionRemovals((previous) => [...previous, ...removals]);
     }
-    setDraftCopies((previous) => previous.filter((copy) => copy.key !== key));
-    if (removed?.isCommander) setCommanderId("");
+    setDraftCopies((previous) => previous.filter((copy) => !keys.has(copy.key)));
+    if (group.copies.some((copy) => copy.isCommander)) setCommanderId("");
     setRemovalPrompt(null);
     setDraftDirty(true);
   }
@@ -655,14 +732,19 @@ export default function DeckDetailPage() {
   if (!deck) return <p className="text-stone-500">Deck not found.</p>;
 
   const cards = sortedDraftCopies(draftCopies, sortMode);
+  const groupedCards = groupedDraftCopies(cards);
+  const uniqueCardCount = new Set(cards.map(draftCopyBaseGroupKey)).size;
   const cardGroups = sortMode === "type"
     ? TYPE_ORDER.map((category) => ({
         key: category,
         label: TYPE_SECTION_LABELS[category] ?? category,
-        copies: cards.filter((copy) => draftTypeCategory(copy) === category),
-      })).filter((group) => group.copies.length > 0)
-    : [{ key: "all", label: null, copies: cards }];
+        cards: groupedCards.filter((group) => draftTypeCategory(group.representative) === category),
+      })).filter((group) => group.cards.length > 0)
+    : [{ key: "all", label: null, cards: groupedCards }];
   const selectedDraftCopy = draftCopies.find((copy) => copy.key === printingEditorKey) ?? null;
+  const selectedDraftGroup = selectedDraftCopy
+    ? groupedCards.find((group) => group.key === draftCopyGroupKey(selectedDraftCopy)) ?? null
+    : null;
   const selectedModalCard: DeckCard | null = selectedDraftCopy ? {
     id: -1,
     scryfall_id: selectedDraftCopy.cardScryfallId,
@@ -1022,7 +1104,7 @@ export default function DeckDetailPage() {
             <div className="flex flex-wrap items-end justify-between gap-3">
               <h3 className="font-display text-2xl text-stone-100">Main list</h3>
               <div className="flex items-center gap-3">
-                <span className="text-sm text-stone-500">{cards.length} cards</span>
+                <span className="text-sm text-stone-500">{cards.length} cards · {uniqueCardCount} unique</span>
                 <label className="text-xs font-medium uppercase tracking-wider text-stone-500">
                   Sort
                   <select
@@ -1043,20 +1125,35 @@ export default function DeckDetailPage() {
               </div>
             ) : (
               <div className="mt-3 space-y-6">
-                {cardGroups.map((group) => (
-                  <section key={group.key}>
-                    {group.label && (
+                {cardGroups.map((cardGroup) => (
+                  <section key={cardGroup.key}>
+                    {cardGroup.label && (
                       <div className="flex items-center gap-3 border-b border-white/10 pb-2">
-                        <h4 className="text-xs font-semibold uppercase tracking-[0.18em] text-stone-300">{group.label}</h4>
-                        <span className="text-xs text-stone-600">{group.copies.length}</span>
+                        <h4 className="text-xs font-semibold uppercase tracking-[0.18em] text-stone-300">{cardGroup.label}</h4>
+                        <span className="text-xs text-stone-600">
+                          {cardGroup.cards.reduce((total, group) => total + group.copies.length, 0)} cards · {new Set(cardGroup.cards.map((group) => draftCopyBaseGroupKey(group.representative))).size} unique
+                        </span>
                       </div>
                     )}
-                    <div className={`${group.label ? "mt-3 " : ""}grid grid-cols-[repeat(auto-fill,minmax(155px,1fr))] gap-3 sm:grid-cols-[repeat(auto-fill,minmax(175px,1fr))] 2xl:grid-cols-[repeat(auto-fill,minmax(190px,1fr))]`}>
-                {group.copies.map((copy) => {
+                    <div className={`${cardGroup.label ? "mt-3 " : ""}grid grid-cols-[repeat(auto-fill,minmax(155px,1fr))] gap-3 sm:grid-cols-[repeat(auto-fill,minmax(175px,1fr))] 2xl:grid-cols-[repeat(auto-fill,minmax(190px,1fr))]`}>
+                {cardGroup.cards.map((copyGroup) => {
+                  const copy = copyGroup.representative;
                   const displayed = copy.printing ?? copy.card;
+                  const printingCount = new Set(copyGroup.copies.map((groupCopy) => (
+                    `${groupCopy.printingScryfallId ?? "any"}:${String(groupCopy.foil)}`
+                  ))).size;
+                  const statusSummary = [
+                    ["Need", copyGroup.copies.filter((groupCopy) => groupCopy.status === "pending").length],
+                    ["Grabbed", copyGroup.copies.filter((groupCopy) => groupCopy.status === "grabbed" && !groupCopy.addToCollection).length],
+                    ["Proxied", copyGroup.copies.filter((groupCopy) => groupCopy.status === "proxy").length],
+                    ["Added", copyGroup.copies.filter((groupCopy) => groupCopy.addToCollection).length],
+                  ].filter(([, count]) => Number(count) > 0);
+                  const allAdded = copyGroup.copies.every((groupCopy) => groupCopy.addToCollection);
+                  const allGrabbed = copyGroup.copies.every((groupCopy) => groupCopy.status === "grabbed" && !groupCopy.addToCollection);
+                  const allProxied = copyGroup.copies.every((groupCopy) => groupCopy.status === "proxy" && !groupCopy.addToCollection);
                   return (
-                    <article key={copy.key} className={`overflow-hidden rounded-xl border bg-ink-900/65 shadow-card ${
-                      copy.status === "grabbed" ? "border-emerald-500/25" : copy.status === "proxy" ? "border-violet-500/30" : "border-white/10"
+                    <article key={copyGroup.key} className={`overflow-hidden rounded-xl border bg-ink-900/65 shadow-card ${
+                      allAdded ? "border-sky-500/30" : allGrabbed ? "border-emerald-500/25" : allProxied ? "border-violet-500/30" : "border-white/10"
                     }`}>
                       <CardHoverPreview src={displayed.image_uri_normal} name={copy.card.name}>
                         <button type="button" onClick={() => setPrintingEditorKey(copy.key)} className="relative block aspect-[5/7] w-full overflow-hidden bg-ink-800">
@@ -1066,7 +1163,8 @@ export default function DeckDetailPage() {
                             <span className="flex h-full items-center justify-center p-3 text-xs text-stone-500">{copy.card.name}</span>
                           )}
                           {copy.isCommander && <span className="absolute left-2 top-2 rounded-full bg-black/80 px-2 py-1 text-[10px] font-semibold text-arcane-200">Commander</span>}
-                          {copy.addToCollection && <span className="absolute bottom-2 left-2 rounded-full bg-emerald-950/90 px-2 py-1 text-[10px] font-semibold text-emerald-200">New collection copy</span>}
+                          <span className="absolute right-2 top-2 rounded-full bg-black/80 px-2 py-1 text-xs font-bold text-stone-100">×{copyGroup.copies.length}</span>
+                          {allAdded && <span className="absolute bottom-2 left-2 rounded-full bg-sky-950/90 px-2 py-1 text-[10px] font-semibold text-sky-200">New collection copies</span>}
                         </button>
                       </CardHoverPreview>
                       <div className="space-y-1 p-3">
@@ -1074,31 +1172,31 @@ export default function DeckDetailPage() {
                           {copy.card.name}
                         </button>
                         <p className="truncate text-[10px] text-stone-500">
-                          {[displayed.set_code?.toUpperCase(), displayed.collector_number, copy.foil ? "Foil" : null].filter(Boolean).join(" · ") || copy.card.type_line || "Any printing"}
+                          {printingCount > 1
+                            ? "Multiple printings"
+                            : [displayed.set_code?.toUpperCase(), displayed.collector_number, copy.foil ? "Foil" : null].filter(Boolean).join(" · ") || copy.card.type_line || "Any printing"}
+                        </p>
+                        <p className="truncate text-[10px] text-stone-500">
+                          {statusSummary.map(([label, count]) => `${label} ${count}`).join(" · ")}
                         </p>
                         <button
                           type="button"
                           onClick={() => setPrintingEditorKey(copy.key)}
                           className="mt-2 w-full rounded-md border border-white/10 bg-white/5 px-2 py-1 text-[9px] font-semibold uppercase tracking-wide text-stone-400 hover:border-emerald-400/30 hover:bg-emerald-500/10 hover:text-emerald-200"
                         >
-                          Change printing
+                          Change printing{copyGroup.copies.length > 1 ? " for all" : ""}
                         </button>
                         <div className="grid grid-cols-5 gap-1 pt-2">
                           {(["pending", "grabbed", "proxy", "added"] as const).map((action) => {
                             const selected = action === "added"
-                              ? copy.addToCollection
-                              : !copy.addToCollection && copy.status === action;
+                              ? copyGroup.copies.every((groupCopy) => groupCopy.addToCollection)
+                              : copyGroup.copies.every((groupCopy) => !groupCopy.addToCollection && groupCopy.status === action);
                             return (
                             <button
                               key={action}
                               type="button"
                               disabled={selected}
-                              onClick={() => {
-                                setDraftCopies((previous) => previous.map((row) => (
-                                  row.key === copy.key ? applyDraftAction(row, action) : row
-                                )));
-                                setDraftDirty(true);
-                              }}
+                              onClick={() => requestGroupAction(copyGroup, action)}
                               className={`rounded-md px-1 py-1 text-[9px] font-semibold uppercase tracking-wide ${
                                 selected
                                   ? action === "grabbed" ? "bg-emerald-500/25 text-emerald-100" : action === "proxy" ? "bg-violet-500/25 text-violet-100" : action === "added" ? "bg-sky-500/25 text-sky-100" : "bg-amber-500/20 text-amber-100"
@@ -1112,15 +1210,15 @@ export default function DeckDetailPage() {
                           <button
                             type="button"
                             onClick={() => {
-                              if (copy.status === "grabbed" && copy.persistedGrabbed && !copy.addToCollection) {
-                                setRemovalPrompt(copy);
+                              if (copyGroup.copies.some((groupCopy) => groupCopy.status === "grabbed" && groupCopy.persistedGrabbed && !groupCopy.addToCollection)) {
+                                setRemovalPrompt(copyGroup);
                               } else {
-                                removeCopy(copy.key);
+                                removeCopies(copyGroup);
                               }
                             }}
                             className="rounded-md bg-red-500/10 px-1 py-1 text-[9px] font-semibold uppercase tracking-wide text-red-300 hover:bg-red-500/20"
                           >
-                            Delete
+                            {copyGroup.copies.length > 1 ? `Delete ×${copyGroup.copies.length}` : "Delete"}
                           </button>
                         </div>
                       </div>
@@ -1135,7 +1233,7 @@ export default function DeckDetailPage() {
           </div>
         </div>
       </div>
-      {selectedModalCard && selectedDraftCopy && (
+      {selectedModalCard && selectedDraftCopy && selectedDraftGroup && (
         <DeckPrintingModal
           deckId={deck.id}
           deckCard={selectedModalCard}
@@ -1144,21 +1242,22 @@ export default function DeckDetailPage() {
           onClose={() => setPrintingEditorKey(null)}
           onDraftSaved={(updatedCard) => {
             const allocation = updatedCard.allocations[0];
-            setDraftCopies((previous) => previous.map((copy) => copy.key === selectedDraftCopy.key ? {
-              ...copy,
-              printingScryfallId: allocation?.scryfall_id ?? null,
-              printing: allocation?.printing ?? null,
-              foil: allocation?.foil ?? null,
-              status: allocation?.status ?? copy.status,
-              addToCollection: Boolean(
-                copy.addToCollection
-                && allocation?.scryfall_id === copy.printingScryfallId
-              ),
-              collectionAdditionId: (
-                copy.addToCollection
-                && allocation?.scryfall_id === copy.printingScryfallId
-              ) ? copy.collectionAdditionId : null,
-            } : copy));
+            const groupKeys = new Set(selectedDraftGroup.copies.map((copy) => copy.key));
+            setDraftCopies((previous) => previous.map((copy) => groupKeys.has(copy.key) ? {
+                ...copy,
+                printingScryfallId: allocation?.scryfall_id ?? null,
+                printing: allocation?.printing ?? null,
+                foil: allocation?.foil ?? null,
+                status: allocation?.status ?? copy.status,
+                addToCollection: Boolean(
+                  copy.addToCollection
+                  && allocation?.scryfall_id === copy.printingScryfallId
+                ),
+                collectionAdditionId: (
+                  copy.addToCollection
+                  && allocation?.scryfall_id === copy.printingScryfallId
+                ) ? copy.collectionAdditionId : null,
+              } : copy));
             setDraftDirty(true);
             setPrintingEditorKey(null);
           }}
@@ -1172,8 +1271,9 @@ export default function DeckDetailPage() {
             setPrintingEditorKey(null);
           }}
           onDraftPrintingAdded={(card, foil) => {
+            const groupKeys = new Set(selectedDraftGroup.copies.map((copy) => copy.key));
             setDraftCopies((previous) => previous.map((copy) => (
-              copy.key === selectedDraftCopy.key
+              groupKeys.has(copy.key)
                 ? {
                     ...copy,
                     printingScryfallId: card.scryfall_id,
@@ -1191,17 +1291,77 @@ export default function DeckDetailPage() {
           }}
         />
       )}
+      {quantityActionPrompt && (
+        <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/75 p-4" role="dialog" aria-modal="true" aria-labelledby="quantity-action-title">
+          <form
+            className="w-full max-w-sm rounded-2xl border border-white/10 bg-ink-900 p-6 shadow-2xl"
+            onSubmit={(event) => {
+              event.preventDefault();
+              applyActionToGroup(
+                quantityActionPrompt.group,
+                quantityActionPrompt.action,
+                Number.parseInt(quantityActionPrompt.quantity, 10),
+              );
+            }}
+          >
+            <h2 id="quantity-action-title" className="font-display text-2xl text-stone-100">
+              Mark as {draftActionLabel(quantityActionPrompt.action)}
+            </h2>
+            <p className="mt-2 text-sm leading-relaxed text-stone-400">
+              How many of the {quantityActionPrompt.group.copies.length} {quantityActionPrompt.group.representative.card.name} copies should move from {draftActionLabel(draftCopyAction(quantityActionPrompt.group.representative))} to {draftActionLabel(quantityActionPrompt.action)}?
+            </p>
+            <label className="mt-5 block text-xs font-medium uppercase tracking-wider text-stone-500">
+              Quantity
+              <input
+                type="number"
+                min={1}
+                max={quantityActionPrompt.group.copies.length}
+                step={1}
+                autoFocus
+                value={quantityActionPrompt.quantity}
+                onChange={(event) => setQuantityActionPrompt({
+                  ...quantityActionPrompt,
+                  quantity: event.target.value,
+                })}
+                className="mt-2 w-full rounded-xl border border-white/10 bg-ink-950/60 px-3 py-2 text-base text-stone-100"
+              />
+            </label>
+            <div className="mt-6 flex justify-end gap-3">
+              <button
+                type="button"
+                onClick={() => setQuantityActionPrompt(null)}
+                className="rounded-xl border border-white/10 px-4 py-2 text-sm text-stone-300 hover:bg-white/5"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={
+                  !Number.isInteger(Number(quantityActionPrompt.quantity))
+                  || Number(quantityActionPrompt.quantity) < 1
+                  || Number(quantityActionPrompt.quantity) > quantityActionPrompt.group.copies.length
+                }
+                className="rounded-xl bg-ember-500/20 px-4 py-2 text-sm font-medium text-ember-100 ring-1 ring-ember-400/30 disabled:opacity-40"
+              >
+                Apply
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
       {removalPrompt && (
         <div className="fixed inset-0 z-[110] flex items-center justify-center bg-black/75 p-4" role="dialog" aria-modal="true" aria-labelledby="remove-deck-copy-title">
           <div className="w-full max-w-md rounded-2xl border border-white/10 bg-ink-900 p-6 shadow-2xl">
-            <h2 id="remove-deck-copy-title" className="font-display text-2xl text-stone-100">Remove {removalPrompt.card.name}?</h2>
+            <h2 id="remove-deck-copy-title" className="font-display text-2xl text-stone-100">
+              Remove {removalPrompt.copies.length > 1 ? `${removalPrompt.copies.length} copies of ` : ""}{removalPrompt.representative.card.name}?
+            </h2>
             <p className="mt-2 text-sm leading-relaxed text-stone-400">
-              This copy is currently grabbed from your collection. Choose whether to return it to bulk inventory or remove the physical card from your collection entirely.
+              {removalPrompt.copies.filter((copy) => copy.status === "grabbed" && copy.persistedGrabbed && !copy.addToCollection).length} of these copies {removalPrompt.copies.filter((copy) => copy.status === "grabbed" && copy.persistedGrabbed && !copy.addToCollection).length === 1 ? "is" : "are"} currently grabbed from your collection. Choose whether to return those physical copies to bulk inventory or remove them from your collection entirely.
             </p>
             <div className="mt-6 grid gap-3">
               <button
                 type="button"
-                onClick={() => removeCopy(removalPrompt.key)}
+                onClick={() => removeCopies(removalPrompt)}
                 className="rounded-xl bg-emerald-500/15 px-4 py-3 text-left text-sm font-medium text-emerald-100 ring-1 ring-emerald-400/25 hover:bg-emerald-500/20"
               >
                 Return to bulk
@@ -1209,7 +1369,7 @@ export default function DeckDetailPage() {
               </button>
               <button
                 type="button"
-                onClick={() => removeCopy(removalPrompt.key, true)}
+                onClick={() => removeCopies(removalPrompt, true)}
                 className="rounded-xl bg-red-500/15 px-4 py-3 text-left text-sm font-medium text-red-100 ring-1 ring-red-400/25 hover:bg-red-500/20"
               >
                 Remove from collection
