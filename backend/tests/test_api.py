@@ -1088,6 +1088,29 @@ def test_deck_draft_save_preserves_sideboard_cards(client: TestClient) -> None:
     assert saved.json()["cards"][0]["is_sideboard"] is True
 
 
+def test_deck_draft_allocation_error_includes_card_name(client: TestClient) -> None:
+    _add_cached_card()
+    created = client.post("/api/decks", json={
+        "name": "Named allocation error",
+        "cards": [{"scryfall_id": SCRYFALL_ID}],
+    }).json()
+
+    response = client.put(f"/api/decks/{created['id']}/draft", json={
+        "name": created["name"],
+        "format": created["format"],
+        "status": created["status"],
+        "cards": [{
+            "card_scryfall_id": SCRYFALL_ID,
+            "printing_scryfall_id": SCRYFALL_ID,
+            "status": "grabbed",
+            "foil": False,
+        }],
+    })
+
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"].startswith("Test Ring: ")
+
+
 def test_add_inventory_card_merges_matching_lines_and_separates_foil(
     client: TestClient,
 ) -> None:

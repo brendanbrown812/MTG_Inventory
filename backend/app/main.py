@@ -2325,19 +2325,25 @@ def save_deck_draft(
                     copy.printing_scryfall_id,
                     foil,
                 )] += 1
-            replace_deck_card_allocations(
-                db,
-                row,
-                [
-                    AllocationSpec(
-                        status=status,
-                        scryfall_id=scryfall_id,
-                        foil=foil,
-                        quantity=quantity,
-                    )
-                    for (status, scryfall_id, foil), quantity in allocation_counts.items()
-                ],
-            )
+            card_name = printings[copies[0].card_scryfall_id].oracle.name
+            try:
+                replace_deck_card_allocations(
+                    db,
+                    row,
+                    [
+                        AllocationSpec(
+                            status=status,
+                            scryfall_id=scryfall_id,
+                            foil=foil,
+                            quantity=quantity,
+                        )
+                        for (status, scryfall_id, foil), quantity in allocation_counts.items()
+                    ],
+                )
+            except AllocationError as exc:
+                raise AllocationError(
+                    f"{card_name}: {exc}", status_code=exc.status_code
+                ) from exc
             desired_rows[key] = row
 
         for removal in body.collection_removals:
