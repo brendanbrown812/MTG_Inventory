@@ -90,8 +90,8 @@ def test_inventory_by_set_counts_distinct_cards_and_owned_copies(
     _add_cached_card()
     with SessionLocal() as db:
         first = db.get(CardPrinting, SCRYFALL_ID)
-        first.set_code = "one"
-        first.scryfall_json = '{"set": "one", "set_name": "First Test Set"}'
+        first.set_code = "zen"
+        first.scryfall_json = '{"set": "zen", "set_name": "Zendikar"}'
         second_oracle = OracleCard(
             oracle_id="00000000-0000-4000-8000-000000000004",
             name="Second Card",
@@ -105,23 +105,24 @@ def test_inventory_by_set_counts_distinct_cards_and_owned_copies(
             CardPrinting(
                 scryfall_id=SECOND_PRINTING_ID,
                 oracle_id=first.oracle_id,
-                set_code="one",
+                set_code="zen",
                 rarity="uncommon",
                 language="en",
             ),
             CardPrinting(
                 scryfall_id="00000000-0000-4000-8000-000000000005",
                 oracle=second_oracle,
-                set_code="one",
+                set_code="zen",
                 rarity="common",
                 language="en",
             ),
             CardPrinting(
                 scryfall_id="00000000-0000-4000-8000-000000000006",
                 oracle_id=first.oracle_id,
-                set_code="two",
+                set_code="znc",
                 rarity="rare",
                 language="en",
+                scryfall_json='{"set": "znc", "set_name": "Zendikar Rising Commander"}',
             ),
         ])
         db.flush()
@@ -147,12 +148,24 @@ def test_inventory_by_set_counts_distinct_cards_and_owned_copies(
     assert response.status_code == 200, response.text
     assert response.json() == [
         {
-            "set_code": "one",
-            "set_name": "First Test Set",
+            "family_name": "Zendikar",
             "unique_cards": 2,
-            "total_cards": 7,
+            "total_cards": 10,
+            "sets": [
+                {
+                    "set_code": "zen",
+                    "set_name": "Zendikar",
+                    "unique_cards": 2,
+                    "total_cards": 7,
+                },
+                {
+                    "set_code": "znc",
+                    "set_name": "Zendikar Rising Commander",
+                    "unique_cards": 1,
+                    "total_cards": 3,
+                },
+            ],
         },
-        {"set_code": "two", "set_name": None, "unique_cards": 1, "total_cards": 3},
     ]
 
 

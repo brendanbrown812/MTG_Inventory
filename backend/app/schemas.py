@@ -34,11 +34,18 @@ class InventoryLineOut(BaseModel):
     card: CardOut | None
 
 
-class InventorySetSummaryOut(BaseModel):
+class InventorySetMemberOut(BaseModel):
     set_code: str
     set_name: str | None = None
     unique_cards: int
     total_cards: int
+
+
+class InventorySetSummaryOut(BaseModel):
+    family_name: str
+    unique_cards: int
+    total_cards: int
+    sets: list[InventorySetMemberOut]
 
 
 class InventoryLineQuantityUpdate(BaseModel):

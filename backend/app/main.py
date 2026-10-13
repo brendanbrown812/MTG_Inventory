@@ -934,52 +934,100 @@ def list_inventory(
 def list_inventory_by_set(
     db: Annotated[Session, Depends(get_db)],
 ):
-    """Summarize owned quantities and distinct Oracle cards for each set."""
-    set_code = func.lower(
-        func.coalesce(
-            func.nullif(func.trim(CardPrinting.set_code), ""),
-            func.nullif(func.trim(InventoryLine.set_code), ""),
-            "unknown",
-        )
-    )
+    """Summarize owned cards in related, name-based set families."""
     rows = (
         db.query(
-            set_code.label("set_code"),
-            func.count(func.distinct(CardPrinting.oracle_id)).label("unique_cards"),
-            func.sum(InventoryLine.quantity).label("total_cards"),
+            CardPrinting.set_code,
+            InventoryLine.set_code,
+            CardPrinting.oracle_id,
+            InventoryLine.quantity,
+            CardPrinting.scryfall_json,
         )
         .join(CardPrinting, InventoryLine.scryfall_id == CardPrinting.scryfall_id)
         .filter(InventoryLine.quantity > 0)
-        .group_by(set_code)
-        .order_by(set_code)
         .all()
     )
-    set_names: dict[str, str] = {}
-    cached_printings = (
-        db.query(CardPrinting.set_code, InventoryLine.set_code, CardPrinting.scryfall_json)
-        .join(InventoryLine, InventoryLine.scryfall_id == CardPrinting.scryfall_id)
-        .filter(InventoryLine.quantity > 0, CardPrinting.scryfall_json.is_not(None))
-        .all()
-    )
-    for printing_set_code, inventory_set_code, raw_payload in cached_printings:
+    sets: dict[str, dict] = {}
+    for printing_set_code, inventory_set_code, oracle_id, quantity, raw_payload in rows:
+        payload = {}
         try:
-            payload = json.loads(raw_payload)
+            payload = json.loads(raw_payload) if raw_payload else {}
         except (TypeError, json.JSONDecodeError):
-            continue
+            pass
         code = (printing_set_code or inventory_set_code or payload.get("set") or "").strip().lower()
-        name = payload.get("set_name")
-        if code and isinstance(name, str) and name.strip():
-            set_names.setdefault(code, name.strip())
+        code = code or "unknown"
+        name = payload.get("set_name") if isinstance(payload.get("set_name"), str) else None
+        entry = sets.setdefault(code, {
+            "set_code": code,
+            "set_name": name.strip() if name and name.strip() else None,
+            "oracle_ids": set(),
+            "total_cards": 0,
+        })
+        if not entry["set_name"] and name and name.strip():
+            entry["set_name"] = name.strip()
+        entry["oracle_ids"].add(oracle_id)
+        entry["total_cards"] += quantity
 
-    return [
-        {
-            "set_code": row.set_code,
-            "set_name": set_names.get(row.set_code),
-            "unique_cards": row.unique_cards,
-            "total_cards": row.total_cards,
-        }
-        for row in rows
-    ]
+    suffixes = re.compile(
+        r"\s+(?:commander(?: decks?)?|tokens?|art series|promos?|promo packs?|extras?|minigames)$",
+        re.IGNORECASE,
+    )
+    for entry in sets.values():
+        display_name = entry["set_name"] or entry["set_code"].upper()
+        family_seed = display_name
+        while True:
+            shortened = suffixes.sub("", family_seed).strip(" :-–—")
+            if shortened == family_seed:
+                break
+            family_seed = shortened
+        entry["family_seed"] = family_seed or display_name
+
+    candidate_names = sorted(
+        {entry["family_seed"] for entry in sets.values()},
+        key=lambda value: (len(value), value.casefold()),
+    )
+    families: dict[str, dict] = {}
+    for entry in sets.values():
+        seed_folded = entry["family_seed"].casefold()
+        family_name = next(
+            (
+                candidate
+                for candidate in candidate_names
+                if seed_folded == candidate.casefold()
+                or seed_folded.startswith(candidate.casefold() + " ")
+                or seed_folded.startswith(candidate.casefold() + ":")
+            ),
+            entry["family_seed"],
+        )
+        family = families.setdefault(family_name.casefold(), {
+            "family_name": family_name,
+            "oracle_ids": set(),
+            "total_cards": 0,
+            "sets": [],
+        })
+        family["oracle_ids"].update(entry["oracle_ids"])
+        family["total_cards"] += entry["total_cards"]
+        family["sets"].append({
+            "set_code": entry["set_code"],
+            "set_name": entry["set_name"],
+            "unique_cards": len(entry["oracle_ids"]),
+            "total_cards": entry["total_cards"],
+        })
+
+    output = []
+    for family in families.values():
+        family["sets"].sort(key=lambda entry: (
+            (entry["set_name"] or entry["set_code"]).casefold(),
+            entry["set_code"],
+        ))
+        output.append({
+            "family_name": family["family_name"],
+            "unique_cards": len(family["oracle_ids"]),
+            "total_cards": family["total_cards"],
+            "sets": family["sets"],
+        })
+    output.sort(key=lambda family: family["family_name"].casefold())
+    return output
 
 
 def _merge_inventory_line(

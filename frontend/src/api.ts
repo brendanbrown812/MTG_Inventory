@@ -123,11 +123,18 @@ export type InventoryOracleGroup = {
   printings: InventoryPrinting[];
 };
 
-export type InventorySetSummary = {
+export type InventorySetMember = {
   set_code: string;
   set_name: string | null;
   unique_cards: number;
   total_cards: number;
+};
+
+export type InventorySetSummary = {
+  family_name: string;
+  unique_cards: number;
+  total_cards: number;
+  sets: InventorySetMember[];
 };
 
 export type Deck = {

@@ -63,31 +63,34 @@ export default function CardsBySetPage() {
       ) : (
         <div className="overflow-hidden rounded-2xl border border-white/10 bg-ink-900/60 shadow-card">
           <div className="flex items-center justify-between border-b border-white/10 px-5 py-4 text-sm text-stone-400 sm:px-6">
-            <span>{sets.length.toLocaleString()} sets</span>
+            <span>{sets.length.toLocaleString()} set families</span>
             <span>{totalCards.toLocaleString()} cards total</span>
           </div>
           <div className="overflow-x-auto">
             <table className="w-full border-collapse text-left">
               <thead>
                 <tr className="border-b border-white/10 text-xs uppercase tracking-wider text-stone-500">
-                  <th className="px-5 py-3 font-medium sm:px-6">Set</th>
+                  <th className="px-5 py-3 font-medium sm:px-6">Set family</th>
                   <th className="px-5 py-3 text-right font-medium sm:px-6">Unique cards</th>
                   <th className="px-5 py-3 text-right font-medium sm:px-6">Total cards</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-white/5">
                 {sets.map((set) => (
-                  <tr key={set.set_code} className="transition hover:bg-white/[0.025]">
+                  <tr key={set.family_name} className="transition hover:bg-white/[0.025]">
                     <td className="px-5 py-4 sm:px-6">
-                      <div className="flex items-baseline gap-3">
-                        <span className="font-medium text-stone-100">
-                          {set.set_name ?? (set.set_code === "unknown" ? "Unknown set" : set.set_code.toUpperCase())}
-                        </span>
-                        {set.set_name && (
-                          <span className="font-mono text-xs font-semibold uppercase tracking-wider text-stone-500">
-                            {set.set_code}
+                      <div className="font-medium text-stone-100">{set.family_name}</div>
+                      <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-1 text-xs text-stone-500">
+                        {set.sets.map((member) => (
+                          <span key={member.set_code}>
+                            {member.set_name ?? (member.set_code === "unknown" ? "Unknown set" : member.set_code.toUpperCase())}
+                            {member.set_name && (
+                              <span className="ml-1 font-mono uppercase tracking-wider text-stone-600">
+                                {member.set_code}
+                              </span>
+                            )}
                           </span>
-                        )}
+                        ))}
                       </div>
                     </td>
                     <td className="px-5 py-4 text-right text-sm tabular-nums text-arcane-400 sm:px-6">
