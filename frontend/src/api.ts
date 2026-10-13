@@ -123,6 +123,12 @@ export type InventoryOracleGroup = {
   printings: InventoryPrinting[];
 };
 
+export type InventorySetSummary = {
+  set_code: string;
+  unique_cards: number;
+  total_cards: number;
+};
+
 export type Deck = {
   id: number;
   name: string;
@@ -280,6 +286,12 @@ export async function fetchGroupedInventory(q: string): Promise<InventoryOracleG
   const p = new URLSearchParams();
   if (q) p.set("q", q);
   const r = await fetch(`${base}/api/inventory/grouped?${p}`);
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+
+export async function fetchInventoryBySet(): Promise<InventorySetSummary[]> {
+  const r = await fetch(`${base}/api/inventory/by-set`);
   if (!r.ok) throw new Error(await r.text());
   return r.json();
 }

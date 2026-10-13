@@ -84,6 +84,72 @@ def test_inventory_listing_and_clear(client: TestClient) -> None:
     assert client.get("/api/inventory").json() == []
 
 
+def test_inventory_by_set_counts_distinct_cards_and_owned_copies(
+    client: TestClient,
+) -> None:
+    _add_cached_card()
+    with SessionLocal() as db:
+        first = db.get(CardPrinting, SCRYFALL_ID)
+        first.set_code = "one"
+        second_oracle = OracleCard(
+            oracle_id="00000000-0000-4000-8000-000000000004",
+            name="Second Card",
+            type_line="Creature",
+            cmc=2,
+            colors="",
+            color_identity="",
+        )
+        db.add(second_oracle)
+        db.add_all([
+            CardPrinting(
+                scryfall_id=SECOND_PRINTING_ID,
+                oracle_id=first.oracle_id,
+                set_code="one",
+                rarity="uncommon",
+                language="en",
+            ),
+            CardPrinting(
+                scryfall_id="00000000-0000-4000-8000-000000000005",
+                oracle=second_oracle,
+                set_code="one",
+                rarity="common",
+                language="en",
+            ),
+            CardPrinting(
+                scryfall_id="00000000-0000-4000-8000-000000000006",
+                oracle_id=first.oracle_id,
+                set_code="two",
+                rarity="rare",
+                language="en",
+            ),
+        ])
+        db.flush()
+        db.add_all([
+            InventoryLine(scryfall_id=SCRYFALL_ID, quantity=2, foil=False, language="en"),
+            InventoryLine(scryfall_id=SECOND_PRINTING_ID, quantity=1, foil=True, language="en"),
+            InventoryLine(
+                scryfall_id="00000000-0000-4000-8000-000000000005",
+                quantity=4,
+                foil=False,
+                language="en",
+            ),
+            InventoryLine(
+                scryfall_id="00000000-0000-4000-8000-000000000006",
+                quantity=3,
+                foil=False,
+                language="en",
+            ),
+        ])
+        db.commit()
+
+    response = client.get("/api/inventory/by-set")
+    assert response.status_code == 200, response.text
+    assert response.json() == [
+        {"set_code": "one", "unique_cards": 2, "total_cards": 7},
+        {"set_code": "two", "unique_cards": 1, "total_cards": 3},
+    ]
+
+
 def test_grouped_inventory_combines_oracle_printings_and_foil_lines(
     client: TestClient,
 ) -> None:

@@ -34,6 +34,12 @@ class InventoryLineOut(BaseModel):
     card: CardOut | None
 
 
+class InventorySetSummaryOut(BaseModel):
+    set_code: str
+    unique_cards: int
+    total_cards: int
+
+
 class InventoryLineQuantityUpdate(BaseModel):
     quantity: int = Field(ge=1, le=999_999)
 

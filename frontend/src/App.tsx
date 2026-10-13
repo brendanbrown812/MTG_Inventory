@@ -15,10 +15,12 @@ import DecksPage from "./pages/DecksPage";
 import EnrichmentPage from "./pages/EnrichmentPage";
 import ImportPage from "./pages/ImportPage";
 import InventoryPage from "./pages/InventoryPage";
+import CardsBySetPage from "./pages/CardsBySetPage";
 
 const nav = [
   { to: "/", label: "Collection" },
   { to: "/import", label: "Import" },
+  { to: "/cards-by-set", label: "Cards by Set" },
   { to: "/decks", label: "Decks" },
   { to: "/assembly", label: "Assembly" },
   { to: "/deckbuilding", label: "Deckbuilding" },
@@ -80,6 +82,7 @@ function AppShell({ status, onLogout }: { status: AuthStatus; onLogout: () => vo
         <Routes>
           <Route path="/" element={<InventoryPage />} />
           <Route path="/import" element={<ImportPage />} />
+          <Route path="/cards-by-set" element={<CardsBySetPage />} />
           <Route path="/decks" element={<DecksPage />} />
           <Route path="/decks/:id" element={<DeckDetailPage />} />
           <Route path="/assembly" element={<DeckAssemblyPage />} />

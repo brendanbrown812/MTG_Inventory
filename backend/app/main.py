@@ -67,6 +67,7 @@ from app.schemas import (
     InventoryLineOut,
     InventoryLineQuantityUpdate,
     InventoryOracleGroupOut,
+    InventorySetSummaryOut,
     InventoryPrintingChange,
     InventoryPrintingChangeOut,
     PrintingOptionOut,
@@ -927,6 +928,40 @@ def list_inventory(
     else:
         query = query.order_by(InventoryLine.id)
     return query.all()
+
+
+@app.get("/api/inventory/by-set", response_model=list[InventorySetSummaryOut])
+def list_inventory_by_set(
+    db: Annotated[Session, Depends(get_db)],
+):
+    """Summarize owned quantities and distinct Oracle cards for each set."""
+    set_code = func.lower(
+        func.coalesce(
+            func.nullif(func.trim(CardPrinting.set_code), ""),
+            func.nullif(func.trim(InventoryLine.set_code), ""),
+            "unknown",
+        )
+    )
+    rows = (
+        db.query(
+            set_code.label("set_code"),
+            func.count(func.distinct(CardPrinting.oracle_id)).label("unique_cards"),
+            func.sum(InventoryLine.quantity).label("total_cards"),
+        )
+        .join(CardPrinting, InventoryLine.scryfall_id == CardPrinting.scryfall_id)
+        .filter(InventoryLine.quantity > 0)
+        .group_by(set_code)
+        .order_by(set_code)
+        .all()
+    )
+    return [
+        {
+            "set_code": row.set_code,
+            "unique_cards": row.unique_cards,
+            "total_cards": row.total_cards,
+        }
+        for row in rows
+    ]
 
 
 def _merge_inventory_line(
