@@ -5,6 +5,7 @@ import {
   changeInventoryLinePrinting,
   changeInventoryPrinting,
   deleteInventoryLine,
+    downloadAvailableCollection,
   downloadCollectionBackup,
   fetchCardLocations,
   fetchCardMatches,
@@ -95,6 +96,7 @@ export default function InventoryPage() {
   const [err, setErr] = useState<string | null>(null);
   const [clearing, setClearing] = useState(false);
   const [exporting, setExporting] = useState(false);
+  const [exportingAvailable, setExportingAvailable] = useState(false);
   const [addCardOpen, setAddCardOpen] = useState(false);
 
   // Filter state
@@ -375,6 +377,18 @@ export default function InventoryPage() {
     }
   }
 
+  async function exportAvailable() {
+    setErr(null);
+    setExportingAvailable(true);
+    try {
+      await downloadAvailableCollection();
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "Available-card export failed");
+    } finally {
+      setExportingAvailable(false);
+    }
+  }
+
   const selectedCard = selected?.card;
   const currentPrinting = selected ? selectedPrinting(selected) : undefined;
   const correctionPrinting = selected && printChangeTarget
@@ -407,6 +421,15 @@ export default function InventoryPage() {
             className="rounded-xl border border-arcane-400/30 bg-arcane-500/10 px-4 py-2.5 text-sm font-medium text-arcane-200 transition hover:bg-arcane-500/20 disabled:opacity-40"
           >
             {exporting ? "Exporting…" : "Export collection"}
+          </button>
+          <button
+            type="button"
+            disabled={exportingAvailable}
+            onClick={() => void exportAvailable()}
+            className="rounded-xl border border-ember-400/30 bg-ember-500/10 px-4 py-2.5 text-sm font-medium text-ember-200 transition hover:bg-ember-500/20 disabled:opacity-40"
+            title="Moxfield-compatible CSV excluding cards grabbed or pending in decks"
+          >
+            {exportingAvailable ? "Exporting…" : "Export available cards"}
           </button>
           <input
             value={q}

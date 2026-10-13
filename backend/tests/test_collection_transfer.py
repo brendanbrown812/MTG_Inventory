@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import gzip
+import csv
+import io
 import json
 import struct
 
@@ -148,6 +150,73 @@ def test_collection_backup_round_trip_is_complete_and_repeat_safe(
         assert embedding.vector == struct.pack("<2f", 0.25, -0.5)
         preference = db.query(RecommendationCardPreference).one()
         assert (preference.accepted_count, preference.rejected_count) == (2, 1)
+
+
+def test_available_collection_export_is_moxfield_compatible_and_excludes_deck_demand(
+    client: TestClient,
+) -> None:
+    _seed_portable_collection()
+    with SessionLocal() as db:
+        line = db.query(InventoryLine).one()
+        line.altered = True
+        deck = Deck(name="Portable Deck", format="commander", status="building")
+        db.add(deck)
+        db.flush()
+        deck_card = DeckCard(
+            deck_id=deck.id,
+            scryfall_id=SCRYFALL_ID,
+            oracle_id=ORACLE_ID,
+            quantity=3,
+            grabbed_quantity=1,
+            proxy_quantity=1,
+        )
+        db.add(deck_card)
+        db.flush()
+        db.add_all([
+            DeckCardAllocation(
+                deck_card_id=deck_card.id,
+                scryfall_id=SCRYFALL_ID,
+                foil=True,
+                status="grabbed",
+                quantity=1,
+            ),
+            DeckCardAllocation(
+                deck_card_id=deck_card.id,
+                scryfall_id=None,
+                foil=None,
+                status="pending",
+                quantity=1,
+            ),
+            DeckCardAllocation(
+                deck_card_id=deck_card.id,
+                scryfall_id=None,
+                foil=None,
+                status="proxy",
+                quantity=1,
+            ),
+        ])
+        db.commit()
+
+    exported = client.get("/api/export/available-collection")
+    assert exported.status_code == 200, exported.text
+    assert exported.headers["content-type"].startswith("text/csv")
+    assert "spellbinder-available-" in exported.headers["content-disposition"]
+    rows = list(csv.DictReader(io.StringIO(exported.content.decode("utf-8-sig"))))
+    assert rows == [{
+        "Count": "1",
+        "Tradelist Count": "",
+        "Name": "Portable Ring",
+        "Edition": "tst",
+        "Condition": "Near Mint",
+        "Language": "English",
+        "Foil": "foil",
+        "Tags": "",
+        "Last Modified": "",
+        "Collector Number": "1",
+        "Alter": "True",
+        "Proxy": "False",
+        "Purchase Price": "4.25",
+    }]
 
 
 def test_collection_import_rejects_invalid_backup_without_changing_inventory(

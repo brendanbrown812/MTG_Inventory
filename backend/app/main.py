@@ -81,6 +81,7 @@ from app.services.collection_transfer import (
     parse_collection_backup,
     restore_collection_backup,
 )
+from app.services.available_collection_export import build_available_collection_csv
 from app.services.deck_transfer import build_deck_backup, import_deck_backup, parse_deck_backup
 from app.services.inventory_printing import (
     InventoryPrintingError,
@@ -1492,6 +1493,23 @@ def export_collection(db: Annotated[Session, Depends(get_db)]):
     return Response(
         content=compressed,
         media_type="application/gzip",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.get("/api/export/available-collection")
+def export_available_collection(db: Annotated[Session, Depends(get_db)]):
+    csv_text, row_count, card_count = build_available_collection_csv(db)
+    filename = f"spellbinder-available-{datetime.now(UTC):%Y-%m-%d}.csv"
+    _log.info(
+        "Available collection exported rows=%s physical_cards=%s bytes=%s",
+        row_count,
+        card_count,
+        len(csv_text.encode("utf-8")),
+    )
+    return Response(
+        content=csv_text.encode("utf-8-sig"),
+        media_type="text/csv; charset=utf-8",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 

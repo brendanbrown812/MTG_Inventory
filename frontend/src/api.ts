@@ -376,6 +376,25 @@ export async function downloadCollectionBackup(): Promise<void> {
   URL.revokeObjectURL(url);
 }
 
+export async function downloadAvailableCollection(): Promise<void> {
+  const r = await fetch(`${base}/api/export/available-collection`);
+  if (!r.ok) {
+    const payload = await r.json().catch(() => null) as { detail?: string } | null;
+    throw new Error(payload?.detail ?? "Could not export available cards");
+  }
+  const disposition = r.headers.get("Content-Disposition") ?? "";
+  const filename = disposition.match(/filename="?([^";]+)"?/i)?.[1]
+    ?? `spellbinder-available-${new Date().toISOString().slice(0, 10)}.csv`;
+  const url = URL.createObjectURL(await r.blob());
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(url);
+}
+
 export type CollectionImportResult = {
   physical_cards: number;
   unique_cards: number;
