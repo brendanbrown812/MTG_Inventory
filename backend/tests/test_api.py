@@ -91,6 +91,7 @@ def test_inventory_by_set_counts_distinct_cards_and_owned_copies(
     with SessionLocal() as db:
         first = db.get(CardPrinting, SCRYFALL_ID)
         first.set_code = "one"
+        first.scryfall_json = '{"set": "one", "set_name": "First Test Set"}'
         second_oracle = OracleCard(
             oracle_id="00000000-0000-4000-8000-000000000004",
             name="Second Card",
@@ -145,8 +146,13 @@ def test_inventory_by_set_counts_distinct_cards_and_owned_copies(
     response = client.get("/api/inventory/by-set")
     assert response.status_code == 200, response.text
     assert response.json() == [
-        {"set_code": "one", "unique_cards": 2, "total_cards": 7},
-        {"set_code": "two", "unique_cards": 1, "total_cards": 3},
+        {
+            "set_code": "one",
+            "set_name": "First Test Set",
+            "unique_cards": 2,
+            "total_cards": 7,
+        },
+        {"set_code": "two", "set_name": None, "unique_cards": 1, "total_cards": 3},
     ]
 
 

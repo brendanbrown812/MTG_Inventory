@@ -79,9 +79,16 @@ export default function CardsBySetPage() {
                 {sets.map((set) => (
                   <tr key={set.set_code} className="transition hover:bg-white/[0.025]">
                     <td className="px-5 py-4 sm:px-6">
-                      <span className="font-mono text-sm font-semibold uppercase tracking-wider text-stone-100">
-                        {set.set_code === "unknown" ? "Unknown set" : set.set_code}
-                      </span>
+                      <div className="flex items-baseline gap-3">
+                        <span className="font-medium text-stone-100">
+                          {set.set_name ?? (set.set_code === "unknown" ? "Unknown set" : set.set_code.toUpperCase())}
+                        </span>
+                        {set.set_name && (
+                          <span className="font-mono text-xs font-semibold uppercase tracking-wider text-stone-500">
+                            {set.set_code}
+                          </span>
+                        )}
+                      </div>
                     </td>
                     <td className="px-5 py-4 text-right text-sm tabular-nums text-arcane-400 sm:px-6">
                       {set.unique_cards.toLocaleString()}

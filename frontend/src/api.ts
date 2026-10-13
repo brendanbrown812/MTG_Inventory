@@ -125,6 +125,7 @@ export type InventoryOracleGroup = {
 
 export type InventorySetSummary = {
   set_code: string;
+  set_name: string | null;
   unique_cards: number;
   total_cards: number;
 };

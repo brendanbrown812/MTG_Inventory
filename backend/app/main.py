@@ -954,9 +954,27 @@ def list_inventory_by_set(
         .order_by(set_code)
         .all()
     )
+    set_names: dict[str, str] = {}
+    cached_printings = (
+        db.query(CardPrinting.set_code, InventoryLine.set_code, CardPrinting.scryfall_json)
+        .join(InventoryLine, InventoryLine.scryfall_id == CardPrinting.scryfall_id)
+        .filter(InventoryLine.quantity > 0, CardPrinting.scryfall_json.is_not(None))
+        .all()
+    )
+    for printing_set_code, inventory_set_code, raw_payload in cached_printings:
+        try:
+            payload = json.loads(raw_payload)
+        except (TypeError, json.JSONDecodeError):
+            continue
+        code = (printing_set_code or inventory_set_code or payload.get("set") or "").strip().lower()
+        name = payload.get("set_name")
+        if code and isinstance(name, str) and name.strip():
+            set_names.setdefault(code, name.strip())
+
     return [
         {
             "set_code": row.set_code,
+            "set_name": set_names.get(row.set_code),
             "unique_cards": row.unique_cards,
             "total_cards": row.total_cards,
         }

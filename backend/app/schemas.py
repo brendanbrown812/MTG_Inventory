@@ -36,6 +36,7 @@ class InventoryLineOut(BaseModel):
 
 class InventorySetSummaryOut(BaseModel):
     set_code: str
+    set_name: str | None = None
     unique_cards: int
     total_cards: int
 
