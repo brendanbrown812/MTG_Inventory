@@ -795,6 +795,22 @@ export async function updateDeckAssembly(
   return r.json();
 }
 
+export async function addAllDeckCardsToCollection(
+  deckId: number,
+  batchId: string,
+): Promise<DeckDetail> {
+  const r = await fetch(`${base}/api/decks/${deckId}/assembly/add-all`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ batch_id: batchId }),
+  });
+  if (!r.ok) {
+    const payload = await r.json().catch(() => null) as { detail?: string } | null;
+    throw new Error(payload?.detail ?? "Could not add deck cards to the collection");
+  }
+  return r.json();
+}
+
 export async function fetchCardMatches(scryfallId: string, minScore = 35): Promise<DeckMatch[]> {
   const r = await fetch(`${base}/api/cards/${encodeURIComponent(scryfallId)}/matches?min_score=${minScore}`);
   if (!r.ok) throw new Error(await r.text());

@@ -764,6 +764,90 @@ def test_deck_assembly_tracks_physical_copies_proxies_and_demand(
     assert locations["pending_total"] == 0
 
 
+def test_add_all_deck_cards_adds_selected_printings_and_is_idempotent(
+    client: TestClient,
+) -> None:
+    _add_cached_card()
+    with SessionLocal() as db:
+        first = db.get(CardPrinting, SCRYFALL_ID)
+        first.set_code = "one"
+        first.collector_number = "1"
+        first.language = "en"
+        db.add(CardPrinting(
+            scryfall_id=SECOND_PRINTING_ID,
+            oracle_id=first.oracle_id,
+            set_code="two",
+            collector_number="2",
+            rarity="uncommon",
+            language="ja",
+        ))
+        db.commit()
+
+    created = client.post("/api/decks", json={
+        "name": "New precon",
+        "cards": [{"scryfall_id": SCRYFALL_ID, "quantity": 2}],
+    })
+    assert created.status_code == 200, created.text
+    deck = created.json()
+    entry = deck["cards"][0]
+
+    selected = client.put(
+        f"/api/decks/{deck['id']}/cards/{entry['id']}/allocations",
+        json={"allocations": [
+            {
+                "status": "pending",
+                "quantity": 1,
+                "scryfall_id": SCRYFALL_ID,
+                "foil": False,
+            },
+            {
+                "status": "pending",
+                "quantity": 1,
+                "scryfall_id": SECOND_PRINTING_ID,
+                "foil": True,
+            },
+        ]},
+    )
+    assert selected.status_code == 200, selected.text
+
+    batch_id = "00000000-0000-4000-8000-000000000099"
+    added = client.post(
+        f"/api/decks/{deck['id']}/assembly/add-all",
+        json={"batch_id": batch_id},
+    )
+    assert added.status_code == 200, added.text
+    added_entry = added.json()["cards"][0]
+    assert added_entry["grabbed_quantity"] == 2
+    assert added_entry["proxy_quantity"] == 0
+    assert {
+        (row["status"], row["scryfall_id"], row["foil"], row["quantity"])
+        for row in added_entry["allocations"]
+    } == {
+        ("grabbed", SCRYFALL_ID, False, 1),
+        ("grabbed", SECOND_PRINTING_ID, True, 1),
+    }
+
+    with SessionLocal() as db:
+        inventory = {
+            (line.scryfall_id, line.foil, line.language): line.quantity
+            for line in db.query(InventoryLine).all()
+        }
+        assert inventory == {
+            (SCRYFALL_ID, False, "en"): 1,
+            (SECOND_PRINTING_ID, True, "ja"): 1,
+        }
+        assert db.query(DeckInventoryAddition).count() == 2
+
+    replayed = client.post(
+        f"/api/decks/{deck['id']}/assembly/add-all",
+        json={"batch_id": batch_id},
+    )
+    assert replayed.status_code == 200, replayed.text
+    with SessionLocal() as db:
+        assert sum(line.quantity for line in db.query(InventoryLine).all()) == 2
+        assert db.query(DeckInventoryAddition).count() == 2
+
+
 def test_deck_card_exact_printing_allocations_are_replaceable(
     client: TestClient,
 ) -> None:

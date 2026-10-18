@@ -1277,7 +1277,7 @@ export default function DeckDetailPage() {
             setDraftDirty(true);
             setPrintingEditorKey(null);
           }}
-          onDraftPrintingAdded={(card, foil) => {
+          onAlternatePrintingSelected={(card, foil) => {
             const groupKeys = new Set(selectedDraftGroup.copies.map((copy) => copy.key));
             setDraftCopies((previous) => previous.map((copy) => (
               groupKeys.has(copy.key)

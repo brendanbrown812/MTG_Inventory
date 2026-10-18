@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import {
+  addAllDeckCardsToCollection,
   createDeck,
   fetchDeck,
   fetchDecks,
   fetchInventory,
   previewDeckText,
+  replaceDeckCardAllocations,
   updateDeckCardAssembly,
   updateDeckAssembly,
   type Deck,
@@ -13,9 +15,11 @@ import {
   type DeckTextPreview,
   type InventoryLine,
 } from "../api";
+import { randomUuid } from "../lib/uuid";
 import {
   DeckPrintingModal,
   deckAllocationUnits,
+  groupDeckAllocationUnits,
 } from "../components/DeckPrintingModal";
 import { CONSTRUCTED_FORMATS, formatOptionLabel } from "../lib/formats";
 
@@ -288,11 +292,21 @@ function CardChecklist({
                 >
                   {card.name}
                 </button>
-                <p className="truncate text-[10px] text-stone-500">
+                <button
+                  type="button"
+                  onClick={() => {
+                    cancelHoverPreview();
+                    onOpenCard?.(card);
+                  }}
+                  disabled={!onOpenCard}
+                  className="block max-w-full truncate text-left text-[10px] text-stone-500 enabled:hover:text-ember-300 disabled:cursor-default"
+                  title={onOpenCard ? "Change printing" : undefined}
+                >
                   {[card.setCode?.toUpperCase(), card.collectorNumber, card.foil ? "Foil" : null]
                     .filter(Boolean)
                   .join(" · ") || card.typeLine || "Card"}
-                </p>
+                  {onOpenCard ? " · Change printing" : ""}
+                </button>
                 <div className="grid grid-cols-3 gap-1 pt-2">
                   {(["pending", "grabbed", "proxy"] as const).map((status) => (
                     <button
@@ -654,6 +668,30 @@ export default function DeckAssemblyPage() {
     }
   }
 
+  async function addAllAsNewCopies() {
+    if (!activeDeck) return;
+    if (!confirm(
+      `Add one new physical copy of every card in “${activeDeck.name}” to your collection and mark the entire deck grabbed?`,
+    )) return;
+    setWorking(true);
+    setError(null);
+    try {
+      const updated = await addAllDeckCardsToCollection(activeDeck.id, randomUuid());
+      const inventoryRows = await fetchInventory("", "name");
+      const nextOwned = new Map<string, number>();
+      for (const row of inventoryRows) {
+        if (row.card) nextOwned.set(row.card.oracle_id, (nextOwned.get(row.card.oracle_id) ?? 0) + row.quantity);
+      }
+      setInventory(inventoryRows);
+      setActiveDeck(updated);
+      setCards(expandDeck(updated, nextOwned));
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not add deck cards to the collection");
+    } finally {
+      setWorking(false);
+    }
+  }
+
   const remainingCards = sortedCards(cards.filter((card) => card.status === "pending"), sortMode);
   const grabbedCards = sortedCards(cards.filter((card) => card.status === "grabbed"), sortMode);
   const proxyCards = sortedCards(cards.filter((card) => card.status === "proxy"), sortMode);
@@ -837,6 +875,9 @@ export default function DeckAssemblyPage() {
               <button type="button" disabled={working} onClick={() => void setAllStatuses("grabbed")} className="rounded-lg border border-white/10 bg-ink-800 px-3 py-2 text-xs text-stone-300 hover:bg-ink-700 disabled:opacity-40">Mark all grabbed</button>
               <button type="button" disabled={working} onClick={() => void setAllStatuses("pending")} className="rounded-lg border border-white/10 bg-ink-800 px-3 py-2 text-xs text-stone-300 hover:bg-ink-700 disabled:opacity-40">Mark all needed</button>
               <button type="button" disabled={working} onClick={() => void setAllStatuses("proxy")} className="rounded-lg border border-white/10 bg-ink-800 px-3 py-2 text-xs text-stone-300 hover:bg-ink-700 disabled:opacity-40">Mark all proxied</button>
+              {activeDeck && (
+                <button type="button" disabled={working} onClick={() => void addAllAsNewCopies()} className="rounded-lg border border-emerald-400/30 bg-emerald-500/10 px-3 py-2 text-xs font-medium text-emerald-200 hover:bg-emerald-500/20 disabled:opacity-40">Mark all added</button>
+              )}
             </div>
           </div>
 
@@ -860,6 +901,22 @@ export default function DeckAssemblyPage() {
               setCards(expandDeck(updated, ownedByOracle));
               setPrintingEditor(null);
             }}
+            onAlternatePrintingSelected={async (card, foil) => {
+              const units = deckAllocationUnits(deckCard).map((unit, index) => (
+                index === printingEditor.unitIndex
+                  ? { ...unit, scryfallId: card.scryfall_id, foil }
+                  : unit
+              ));
+              const updated = await replaceDeckCardAllocations(
+                activeDeck.id,
+                deckCard.id,
+                groupDeckAllocationUnits(units),
+              );
+              setActiveDeck(updated);
+              setCards(expandDeck(updated, ownedByOracle));
+              setPrintingEditor(null);
+            }}
+            alternatePrintingDescription="Choose the exact printing for this deck copy. It can be added to your collection later with Mark all added."
           />
         ) : null;
       })()}

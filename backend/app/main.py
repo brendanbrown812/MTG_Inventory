@@ -49,6 +49,7 @@ from app.schemas import (
     ClearInventoryResult,
     CollectionImportResult,
     DeckAssemblyBatchUpdate,
+    DeckAssemblyAddAll,
     DeckBackupPreview,
     DeckCardAllocationReplace,
     DeckCardAssemblyUpdate,
@@ -2714,6 +2715,103 @@ def update_deck_assembly(
             proxy_quantity=entry.proxy_quantity,
         )
     db.commit()
+    return get_deck(deck_id, db)
+
+
+@app.post("/api/decks/{deck_id}/assembly/add-all", response_model=DeckDetailOut)
+def add_all_deck_cards_to_collection(
+    deck_id: int,
+    body: DeckAssemblyAddAll,
+    db: Annotated[Session, Depends(get_db)],
+):
+    """Add one new physical copy per deck copy and mark every copy grabbed."""
+    deck = db.get(Deck, deck_id)
+    if deck is None:
+        raise HTTPException(404, detail="Deck not found")
+    deck_cards = (
+        db.query(DeckCard)
+        .filter(DeckCard.deck_id == deck_id)
+        .order_by(DeckCard.id)
+        .all()
+    )
+    if not deck_cards:
+        raise HTTPException(422, detail="The deck has no cards to add")
+
+    try:
+        for deck_card in deck_cards:
+            ensure_deck_card_allocations(db, deck_card)
+        db.flush()
+
+        for deck_card in deck_cards:
+            allocations = (
+                db.query(DeckCardAllocation)
+                .filter(DeckCardAllocation.deck_card_id == deck_card.id)
+                .order_by(DeckCardAllocation.id)
+                .all()
+            )
+            if sum(allocation.quantity for allocation in allocations) != deck_card.quantity:
+                raise HTTPException(
+                    409,
+                    detail=f"{deck_card.oracle_card.name}: deck allocations are incomplete",
+                )
+
+            selected_copies: list[tuple[str, bool]] = []
+            for allocation in allocations:
+                scryfall_id = allocation.scryfall_id or deck_card.scryfall_id
+                printing = db.get(CardPrinting, scryfall_id)
+                if printing is None or printing.oracle_id != deck_card.oracle_id:
+                    raise HTTPException(422, detail="Selected printing does not match its deck card")
+                foil = allocation.foil if allocation.foil is not None else False
+                selected_copies.extend([(scryfall_id, foil)] * allocation.quantity)
+
+            selected_copies.sort(key=lambda copy: (copy[0], copy[1]))
+            grabbed: Counter[tuple[str, bool]] = Counter(selected_copies)
+            for copy_index, (scryfall_id, foil) in enumerate(selected_copies):
+                addition_id = str(uuid.uuid5(
+                    body.batch_id,
+                    f"{deck_id}:{deck_card.id}:{copy_index}",
+                ))
+                prior = db.get(DeckInventoryAddition, addition_id)
+                if prior is not None:
+                    if (
+                        prior.deck_id != deck_id
+                        or prior.scryfall_id != scryfall_id
+                        or prior.foil != foil
+                    ):
+                        raise HTTPException(409, detail="This add-all request conflicts with prior data")
+                    continue
+                printing = db.get(CardPrinting, scryfall_id)
+                _merge_inventory_line(
+                    db,
+                    scryfall_id=scryfall_id,
+                    quantity=1,
+                    foil=foil,
+                    language=printing.language or "en",
+                )
+                db.add(DeckInventoryAddition(
+                    addition_id=addition_id,
+                    deck_id=deck_id,
+                    scryfall_id=scryfall_id,
+                    foil=foil,
+                ))
+
+            replace_deck_card_allocations(
+                db,
+                deck_card,
+                [
+                    AllocationSpec(
+                        status="grabbed",
+                        scryfall_id=scryfall_id,
+                        foil=foil,
+                        quantity=quantity,
+                    )
+                    for (scryfall_id, foil), quantity in grabbed.items()
+                ],
+            )
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
     return get_deck(deck_id, db)
 
 

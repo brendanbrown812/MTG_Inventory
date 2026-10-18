@@ -1,5 +1,6 @@
 from datetime import datetime
 from typing import Annotated, Any, Literal
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -247,6 +248,10 @@ class DeckAssemblyEntryUpdate(DeckCardAssemblyUpdate):
 
 class DeckAssemblyBatchUpdate(BaseModel):
     cards: list[DeckAssemblyEntryUpdate] = Field(min_length=1, max_length=1_000)
+
+
+class DeckAssemblyAddAll(BaseModel):
+    batch_id: UUID
 
 
 class DeckCardAllocationIn(BaseModel):
