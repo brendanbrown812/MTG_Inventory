@@ -20,6 +20,7 @@ import {
 import { CardHoverPreview } from "../components/CardHoverPreview";
 import { DeckPrintingModal } from "../components/DeckPrintingModal";
 import { CONSTRUCTED_FORMATS, formatOptionLabel } from "../lib/formats";
+import { cardTypeCategory, compareDeckCards, TYPE_ORDER, TYPE_SECTION_LABELS, type DeckSortMode } from "../lib/deckSorting";
 import { randomUuid } from "../lib/uuid";
 
 function AnalysisPanel({ analysis, loading }: { analysis: DeckAnalysis | null; loading: boolean }) {
@@ -137,26 +138,6 @@ function AnalysisPanel({ analysis, loading }: { analysis: DeckAnalysis | null; l
 
 type DraftStatus = "pending" | "grabbed" | "proxy";
 type DraftAction = DraftStatus | "added";
-type DeckSortMode = "name" | "type" | "color";
-
-const COLOR_ORDER = ["W", "U", "B", "R", "G"];
-const TYPE_ORDER = [
-  "Legendary Creature", "Creature", "Planeswalker", "Instant", "Sorcery",
-  "Artifact", "Enchantment", "Battle", "Land", "Other",
-];
-const TYPE_SECTION_LABELS: Record<string, string> = {
-  "Legendary Creature": "Legendary Creatures",
-  Creature: "Creatures",
-  Planeswalker: "Planeswalkers",
-  Instant: "Instants",
-  Sorcery: "Sorceries",
-  Artifact: "Artifacts",
-  Enchantment: "Enchantments",
-  Battle: "Battles",
-  Land: "Lands",
-  Other: "Other",
-};
-
 type DraftCopy = {
   key: string;
   card: Card;
@@ -192,49 +173,8 @@ type DraftCollectionRemoval = {
   foil: boolean | null;
 };
 
-function normalizedColors(raw: string): string[] {
-  const values = raw.trim().startsWith("[")
-    ? (() => {
-        try { return JSON.parse(raw) as unknown; } catch { return []; }
-      })()
-    : raw.split(",");
-  return Array.isArray(values)
-    ? values.map(String).map((value) => value.trim().toUpperCase()).filter((value) => COLOR_ORDER.includes(value))
-    : [];
-}
-
-function draftColorSortKey(copy: DraftCopy): number {
-  const colors = normalizedColors(copy.card.colors);
-  if (colors.length === 1) return COLOR_ORDER.indexOf(colors[0] ?? "");
-  if (colors.length > 1) return COLOR_ORDER.length;
-  return COLOR_ORDER.length + 1;
-}
-
-function draftTypeCategory(copy: DraftCopy): string {
-  const typeLine = copy.card.type_line ?? "";
-  if (typeLine.includes("Legendary") && typeLine.includes("Creature")) return "Legendary Creature";
-  if (typeLine.includes("Creature")) return "Creature";
-  for (const category of TYPE_ORDER.slice(2, -1)) {
-    if (typeLine.includes(category)) return category;
-  }
-  return "Other";
-}
-
-function adjustedManaValue(copy: DraftCopy): number {
-  const variableSymbols = copy.card.mana_cost?.match(/\{X\}/gi)?.length ?? 0;
-  return copy.card.cmc + variableSymbols;
-}
-
 function sortedDraftCopies(copies: DraftCopy[], mode: DeckSortMode): DraftCopy[] {
-  return [...copies].sort((left, right) => {
-    const primary = mode === "color"
-      ? draftColorSortKey(left) - draftColorSortKey(right)
-      : mode === "type"
-        ? TYPE_ORDER.indexOf(draftTypeCategory(left)) - TYPE_ORDER.indexOf(draftTypeCategory(right))
-        : 0;
-    const manaValue = mode === "type" ? adjustedManaValue(left) - adjustedManaValue(right) : 0;
-    return primary || manaValue || left.card.name.localeCompare(right.card.name) || left.key.localeCompare(right.key);
-  });
+  return [...copies].sort((left, right) => compareDeckCards(left.card, right.card, mode) || left.key.localeCompare(right.key));
 }
 
 function draftCopyBaseGroupKey(copy: DraftCopy): string {
@@ -743,7 +683,7 @@ export default function DeckDetailPage() {
     ? TYPE_ORDER.map((category) => ({
         key: category,
         label: TYPE_SECTION_LABELS[category] ?? category,
-        cards: groupedCards.filter((group) => draftTypeCategory(group.representative) === category),
+        cards: groupedCards.filter((group) => cardTypeCategory(group.representative.card) === category),
       })).filter((group) => group.cards.length > 0)
     : [{ key: "all", label: null, cards: groupedCards }];
   const selectedDraftCopy = draftCopies.find((copy) => copy.key === printingEditorKey) ?? null;

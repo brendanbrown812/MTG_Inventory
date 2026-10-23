@@ -1,10 +1,11 @@
 import { useEffect, useState } from "react";
-import { Link, NavLink, Route, Routes } from "react-router-dom";
+import { Link, Navigate, NavLink, Route, Routes } from "react-router-dom";
 import {
   clearApiKey,
   fetchAuthStatus,
   login,
   logout,
+  redeemGuestLink,
   setApiKey,
   type AuthStatus,
 } from "./api";
@@ -16,6 +17,14 @@ import EnrichmentPage from "./pages/EnrichmentPage";
 import ImportPage from "./pages/ImportPage";
 import InventoryPage from "./pages/InventoryPage";
 import CardsBySetPage from "./pages/CardsBySetPage";
+import GuestSharingPage from "./pages/GuestSharingPage";
+import { GuestCollectionPage, GuestDecksPage, GuestDeckDetailPage } from "./pages/GuestBrowsePages";
+
+// A fragment never reaches the web server. Remove it before making API requests
+// or loading card images, and exchange it once even under React StrictMode.
+const inviteToken = new URLSearchParams(window.location.hash.slice(1)).get("guest");
+if (inviteToken !== null) window.history.replaceState(null, "", window.location.pathname + window.location.search);
+let inviteRedemption: Promise<unknown> | null = null;
 
 const nav = [
   { to: "/", label: "Collection" },
@@ -28,10 +37,13 @@ const nav = [
 ];
 
 function AppShell({ status, onLogout }: { status: AuthStatus; onLogout: () => void }) {
+  const guest = status.user?.role === "guest";
+  const navigation = guest ? nav.filter((item) => ["/", "/decks"].includes(item.to))
+    : status.mode === "session" && status.user?.role === "admin" ? [...nav, { to: "/sharing", label: "Guest access" }] : nav;
   return (
     <div className="min-h-screen bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-ink-800 via-ink-950 to-ink-950">
       <header className="sticky top-0 z-40 border-b border-white/5 bg-ink-950/80 backdrop-blur-md">
-        <div className="flex w-full items-center justify-between gap-6 px-4 py-4 sm:px-6 lg:px-8 2xl:px-10">
+        <div className="flex w-full flex-wrap items-center justify-between gap-4 px-4 py-4 sm:px-6 lg:px-8 2xl:px-10">
           <Link
             to="/"
             className="group flex items-baseline gap-3 rounded-lg outline-none ring-ember-400/0 transition hover:opacity-90 focus-visible:ring-2 focus-visible:ring-ember-400/50"
@@ -43,9 +55,9 @@ function AppShell({ status, onLogout }: { status: AuthStatus; onLogout: () => vo
               inventory & decks
             </span>
           </Link>
-          <div className="flex items-center gap-3">
-            <nav className="flex items-center gap-1 rounded-full border border-white/10 bg-ink-900/60 p-1 shadow-card">
-              {nav.map((item) => (
+          <div className="flex min-w-0 flex-wrap items-center gap-3">
+            <nav className="flex flex-wrap items-center gap-1 rounded-2xl border border-white/10 bg-ink-900/60 p-1 shadow-card">
+              {navigation.map((item) => (
                 <NavLink
                   key={item.to}
                   to={item.to}
@@ -65,7 +77,7 @@ function AppShell({ status, onLogout }: { status: AuthStatus; onLogout: () => vo
             </nav>
             {status.user && (
               <div className="flex items-center gap-2 text-xs text-stone-400">
-                <span className="hidden xl:inline">{status.user.username}</span>
+                <span className="text-stone-400">{guest ? "Guest · Read only" : status.user.username}</span>
                 <button
                   type="button"
                   onClick={onLogout}
@@ -79,6 +91,12 @@ function AppShell({ status, onLogout }: { status: AuthStatus; onLogout: () => vo
         </div>
       </header>
       <main className="w-full px-4 py-8 sm:px-6 sm:py-10 lg:px-8 2xl:px-10">
+        {guest ? <Routes>
+          <Route path="/" element={<GuestCollectionPage />} />
+          <Route path="/decks" element={<GuestDecksPage />} />
+          <Route path="/decks/:id" element={<GuestDeckDetailPage />} />
+          <Route path="*" element={<Navigate to="/" replace />} />
+        </Routes> :
         <Routes>
           <Route path="/" element={<InventoryPage />} />
           <Route path="/import" element={<ImportPage />} />
@@ -88,7 +106,8 @@ function AppShell({ status, onLogout }: { status: AuthStatus; onLogout: () => vo
           <Route path="/assembly" element={<DeckAssemblyPage />} />
           <Route path="/deckbuilding" element={<DeckbuildingPage />} />
           <Route path="/enrichment" element={<EnrichmentPage />} />
-        </Routes>
+          {status.mode === "session" && status.user?.role === "admin" && <Route path="/sharing" element={<GuestSharingPage />} />}
+        </Routes>}
       </main>
       <footer className="border-t border-white/5 py-8 text-center text-xs text-stone-600">
         Card data © Wizards of the Coast — fetched via Scryfall. Not affiliated.
@@ -108,14 +127,23 @@ export default function App() {
   const [remember, setRemember] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  async function checkAuthentication() {
+  async function checkAuthentication(redeemInvite = false) {
     setChecking(true);
+    let inviteError: string | null = null;
     try {
+      if (redeemInvite && inviteToken !== null) {
+        try {
+          inviteRedemption ??= redeemGuestLink(inviteToken);
+          await inviteRedemption;
+        } catch (err) {
+          inviteError = err instanceof Error ? err.message : "Could not open guest link";
+        }
+      }
       const status = await fetchAuthStatus();
       setStatus(status);
       setApiReachable(true);
       setAuthenticated(status.authenticated);
-      setError(null);
+      setError(inviteError);
     } catch {
       setApiReachable(false);
       setAuthenticated(false);
@@ -126,10 +154,10 @@ export default function App() {
   }
 
   useEffect(() => {
-    void checkAuthentication();
+    void checkAuthentication(true);
     const handleUnauthorized = () => {
       setAuthenticated(false);
-      setError("Your session ended. Sign in again.");
+      setError("Your access has ended. Sign in, or ask the owner for a current guest link.");
     };
     window.addEventListener("spellbinder:unauthorized", handleUnauthorized);
     return () => window.removeEventListener("spellbinder:unauthorized", handleUnauthorized);
@@ -199,12 +227,12 @@ export default function App() {
           <div className="w-full max-w-lg rounded-2xl border border-white/10 bg-ink-900/70 p-6 shadow-card">
             <h1 className="font-display text-3xl font-semibold text-stone-100">Create your administrator</h1>
             <p className="mt-3 text-sm leading-6 text-stone-400">
-              No Spellbinder account exists yet. Open a terminal in the backend folder and run:
+              No Spellbinder account exists yet. On a Mac, double-click create-admin.command in the project folder to create bbrown812 and choose your password. For other setups, open a terminal in the backend folder and run:
             </p>
             <code className="mt-4 block overflow-x-auto rounded-xl bg-ink-950/80 p-4 text-sm text-ember-200">
-              python -m app.auth_cli create-user brend --admin
+              python -m app.auth_cli create-user bbrown812 --admin
             </code>
-            <p className="mt-3 text-xs text-stone-500">Replace “brend” with the username you want, then refresh this page.</p>
+            <p className="mt-3 text-xs text-stone-500">A password is required. Enter it twice when prompted (typing is hidden), then refresh this page. You can replace “bbrown812” with another username.</p>
             <button type="button" onClick={() => void checkAuthentication()} className="mt-5 w-full rounded-xl bg-ember-500/25 px-4 py-2 font-medium text-ember-100 ring-1 ring-ember-400/30">
               I created the account — refresh
             </button>

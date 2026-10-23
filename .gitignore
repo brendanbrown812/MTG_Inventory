@@ -1,9 +1,13 @@
 # Docker / root-level
 .env
+.env.*
+!.env.example
 
 # Backend
 backend/.env
 backend/mtg_inventory.db
+backend/mtg_inventory.db-*
+backend/mtg_inventory.db.bak
 backend/logs/
 backend/__pycache__/
 backend/**/__pycache__/
@@ -15,8 +19,18 @@ backend/.venv/
 frontend/.env
 frontend/node_modules/
 frontend/dist/
+*.tsbuildinfo
+npm-debug.log*
 
 # Python
 *.pyc
 /MTG_Inventory
 /backups/
+
+# Mac launcher's private tools, environment, and download caches
+.local-runtime/
+
+# macOS Finder metadata and resource forks
+.DS_Store
+._*
+.AppleDouble/

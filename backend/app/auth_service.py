@@ -12,7 +12,7 @@ from argon2.exceptions import InvalidHashError, VerificationError, VerifyMismatc
 from sqlalchemy.orm import Session, joinedload
 
 from app.config import settings
-from app.models import AuthSession, User
+from app.models import AuthSession, GuestSession, User
 
 
 USERNAME_RE = re.compile(r"^[a-z0-9][a-z0-9_.-]{2,63}$")
@@ -120,7 +120,7 @@ def find_session(db: Session, token: str | None) -> AuthSession | None:
     return session
 
 
-def csrf_is_valid(session: AuthSession, provided: str | None) -> bool:
+def csrf_is_valid(session: AuthSession | GuestSession, provided: str | None) -> bool:
     return bool(provided) and hmac.compare_digest(session.csrf_token, provided)
 
 
