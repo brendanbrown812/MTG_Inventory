@@ -85,6 +85,7 @@ export function DeckPrintingModal({
   onClose,
   onSaved,
   onDraftSaved,
+  draftQuantity,
   onDraftCommanderSelected,
   onAlternatePrintingSelected,
   alternatePrintingDescription,
@@ -96,7 +97,8 @@ export function DeckPrintingModal({
   initialUnitIndex?: number;
   onClose: () => void;
   onSaved?: (deck: DeckDetail) => void;
-  onDraftSaved?: (deckCard: DeckCard) => void;
+  onDraftSaved?: (deckCard: DeckCard, quantity: number) => void;
+  draftQuantity?: number;
   onDraftCommanderSelected?: () => void;
   onAlternatePrintingSelected?: (card: NonNullable<DeckCard["card"]>, foil: boolean) => void | Promise<void>;
   alternatePrintingDescription?: string;
@@ -116,6 +118,7 @@ export function DeckPrintingModal({
   const [saving, setSaving] = useState(false);
   const [commanderSaving, setCommanderSaving] = useState(false);
   const [addPrintingOpen, setAddPrintingOpen] = useState(false);
+  const [quantity, setQuantity] = useState(String(draftQuantity ?? deckCard.quantity));
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -177,6 +180,15 @@ export function DeckPrintingModal({
   }
 
   async function save() {
+    const nextQuantity = Number(quantity);
+    if (
+      !Number.isInteger(nextQuantity)
+      || nextQuantity < 1
+      || (draftQuantity !== undefined && nextQuantity > draftQuantity)
+    ) {
+      setError(`Quantity must be a whole number from 1 to ${draftQuantity ?? deckCard.quantity}.`);
+      return;
+    }
     const nextUnits = units.map((unit, index) => (
       index === unitIndex
         ? { ...unit, scryfallId: selectedScryfallId, foil: selectedScryfallId ? selectedFoil : null }
@@ -202,7 +214,7 @@ export function DeckPrintingModal({
               ? printings.find((printing) => printing.scryfall_id === allocation.scryfall_id)?.card ?? null
               : null,
           })),
-        });
+        }, nextQuantity);
         return;
       }
       const updated = await replaceDeckCardAllocations(
@@ -315,6 +327,23 @@ export function DeckPrintingModal({
           )}
 
           {!addPrintingOpen && <div className="mt-5 grid gap-4 sm:grid-cols-2">
+            {draftQuantity !== undefined && draftQuantity > 1 && (
+              <label className="text-xs font-medium uppercase tracking-wider text-stone-500">
+                Deck quantity
+                <input
+                  type="number"
+                  min={1}
+                  max={draftQuantity}
+                  step={1}
+                  value={quantity}
+                  onChange={(event) => setQuantity(event.target.value)}
+                  className="mt-1 block w-full rounded-xl border border-white/10 bg-ink-950/60 px-3 py-2 text-sm normal-case tracking-normal text-stone-200"
+                />
+                <span className="mt-1 block text-[10px] font-normal normal-case tracking-normal text-stone-600">
+                  Lower this number to remove copies from the deck.
+                </span>
+              </label>
+            )}
             <label className="text-xs font-medium uppercase tracking-wider text-stone-500">
               Deck copy
               <select value={unitIndex} onChange={(event) => chooseUnit(Number(event.target.value))} className="mt-1 block w-full rounded-xl border border-white/10 bg-ink-950/60 px-3 py-2 text-sm normal-case tracking-normal text-stone-200">
@@ -386,8 +415,20 @@ export function DeckPrintingModal({
 
           {!addPrintingOpen && <div className="mt-6 flex justify-end gap-3">
             <button type="button" onClick={onClose} className="rounded-xl border border-white/10 px-4 py-2 text-sm text-stone-400 hover:bg-white/5">Cancel</button>
-            <button type="button" disabled={saving || loading || Boolean(selectedPrinting && selectedPrinting.foil_quantity > 0 && selectedPrinting.nonfoil_quantity > 0 && selectedFoil === null)} onClick={() => void save()} className="rounded-xl bg-emerald-500/20 px-4 py-2 text-sm font-medium text-emerald-100 ring-1 ring-emerald-400/30 disabled:opacity-40">
-              {saving ? "Saving…" : "Save printing"}
+            <button
+              type="button"
+              disabled={
+                saving
+                || loading
+                || !Number.isInteger(Number(quantity))
+                || Number(quantity) < 1
+                || (draftQuantity !== undefined && Number(quantity) > draftQuantity)
+                || Boolean(selectedPrinting && selectedPrinting.foil_quantity > 0 && selectedPrinting.nonfoil_quantity > 0 && selectedFoil === null)
+              }
+              onClick={() => void save()}
+              className="rounded-xl bg-emerald-500/20 px-4 py-2 text-sm font-medium text-emerald-100 ring-1 ring-emerald-400/30 disabled:opacity-40"
+            >
+              {saving ? "Saving…" : draftQuantity !== undefined ? "Apply changes" : "Save printing"}
             </button>
           </div>}
         </div>

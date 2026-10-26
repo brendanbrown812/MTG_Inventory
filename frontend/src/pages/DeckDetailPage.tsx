@@ -1244,13 +1244,20 @@ export default function DeckDetailPage() {
         <DeckPrintingModal
           deckId={deck.id}
           deckCard={selectedModalCard}
+          draftQuantity={selectedDraftGroup.copies.length}
           allowCommanderSelection={["commander", "edh"].includes(deck.format.toLowerCase())}
           currentCommanderName={draftCopies.find((copy) => copy.isCommander)?.card.name ?? null}
           onClose={() => setPrintingEditorKey(null)}
-          onDraftSaved={(updatedCard) => {
+          onDraftSaved={(updatedCard, quantity) => {
             const allocation = updatedCard.allocations[0];
             const groupKeys = new Set(selectedDraftGroup.copies.map((copy) => copy.key));
-            setDraftCopies((previous) => previous.map((copy) => groupKeys.has(copy.key) ? {
+            const retainedKeys = new Set(
+              selectedDraftGroup.copies.slice(0, quantity).map((copy) => copy.key),
+            );
+            setDraftCopies((previous) => previous.flatMap((copy) => {
+              if (!groupKeys.has(copy.key)) return [copy];
+              if (!retainedKeys.has(copy.key)) return [];
+              return [{
                 ...copy,
                 printingScryfallId: allocation?.scryfall_id ?? null,
                 printing: allocation?.printing ?? null,
@@ -1264,7 +1271,8 @@ export default function DeckDetailPage() {
                   copy.addToCollection
                   && allocation?.scryfall_id === copy.printingScryfallId
                 ) ? copy.collectionAdditionId : null,
-              } : copy));
+              }];
+            }));
             setDraftDirty(true);
             setPrintingEditorKey(null);
           }}
