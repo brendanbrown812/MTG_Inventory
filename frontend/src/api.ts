@@ -27,7 +27,7 @@ async function fetch(input: RequestInfo | URL, init: RequestInit = {}): Promise<
   return response;
 }
 
-export type AuthUser = { username: string; role: "admin" | "viewer" };
+export type AuthUser = { username: string; role: "admin" | "viewer" | "guest" };
 export type AuthStatus = {
   mode: "disabled" | "session" | "api_key" | "external";
   required: boolean;
@@ -72,6 +72,25 @@ export async function logout(): Promise<void> {
   csrfToken = null;
   clearApiKey();
 }
+
+async function guestRequest<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const response = await fetch(`${base}${path}`, init);
+  const payload = await response.json();
+  if (!response.ok) throw new Error(payload.detail ?? "Could not complete guest request");
+  return payload as T;
+}
+
+export type GuestLinkStatus = { enabled: boolean; created_at: string | null; recoverable: boolean };
+export const fetchGuestLinkStatus = () => guestRequest<GuestLinkStatus>("/api/auth/guest-link");
+export const revealGuestLink = () => guestRequest<{ token: string }>("/api/auth/guest-link/reveal");
+export const generateGuestLink = () => guestRequest<{ token: string }>("/api/auth/guest-link", { method: "POST" });
+export const disableGuestLink = () => guestRequest<{ enabled: boolean }>("/api/auth/guest-link", { method: "DELETE" });
+export const redeemGuestLink = (token: string) => guestRequest("/api/auth/guest", {
+  method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ token }),
+});
+export const fetchGuestCollection = () => guestRequest<InventoryOracleGroup[]>("/api/guest/collection");
+export const fetchGuestDecks = () => guestRequest<Deck[]>("/api/guest/decks");
+export const fetchGuestDeck = (id: number) => guestRequest<DeckDetail>(`/api/guest/decks/${id}`);
 
 export type Card = {
   scryfall_id: string;

@@ -64,3 +64,57 @@ The manual backend and Vite development server bind to `127.0.0.1`. With `AUTH_M
 ## Public endpoints
 
 `/api/health`, `/api/auth/status`, and `/api/auth/login` are public so health checks and sign-in work. Login responses use generic errors and repeated failed attempts are throttled. All other `/api/` routes require the configured authentication mode. In session mode, mutations require the CSRF token returned after login.
+
+## Shared guest link
+
+When signed in as the native administrator, open **Guest access** in the top
+navigation. **Generate guest link** creates one private link for all friends;
+no guest accounts or passwords are needed. Guest sharing starts disabled.
+Guests can browse the collection, deck list, and individual decks, including
+commanders and sideboards. Deck notes remain private. The guest interface has
+image galleries for owned collection printings and assigned deck printings,
+including set/collector numbers, foil treatments, and click-to-enlarge previews.
+Copies with no assigned printing are labelled as example artwork. It has
+no editing, import, export, settings, assembly, or AI tools. The backend also
+rejects guest requests to every administrator endpoint, including GET routes
+that can fetch external data or change cached state.
+
+Generate the link while visiting your hosted site's public HTTPS address.
+A link generated at `127.0.0.1` or `localhost` only works on that computer.
+The Mac development launcher still binds only to loopback. Guest sharing does
+not publish your Mac or change your deployment's existing network access rules.
+If an upstream proxy requires authentication, friends must also satisfy that
+proxy's access rules.
+
+Use **Show existing guest link** to retrieve and copy the current link again.
+This administrator-only action does not change the link, its creation time,
+or existing guest sessions. To support retrieval, the active invite secret is
+stored in the application's private database alongside its verification digest;
+protect the database and its backups as credentials. Browser session tokens
+remain stored only as digests. The retrieval response is marked private and
+no-store, and guest/anonymous clients cannot access it.
+
+**Regenerate guest link** replaces the link and revokes all existing guest
+sessions. **Disable guest access** revokes the link and sessions and removes
+the saved invite secret. These changes take effect on each subsequent API
+request; content already viewed cannot be recalled.
+
+Older installations stored only an invite digest. The schema upgrade preserves
+those links and sessions. If the existing link cannot yet be shown, have a
+holder open the original invite once: a successful redemption saves that same
+secret for future administrator retrieval without rotation or revocation. An
+existing guest session alone cannot reconstruct the invite. If no one has a
+copy of the original link, regenerating it is necessary.
+
+The link carries its secret in a URL fragment (`/#guest=...`), which is removed
+from the browser address bar before it is exchanged in a POST body for a
+separate HttpOnly, SameSite=Strict guest cookie. Guest sessions last 30 days
+unless revoked sooner. Production HTTPS deployments should keep
+`SESSION_COOKIE_SECURE=true`; local HTTP uses `false`. Invite digests and guest
+session digests live in new SQLite tables created automatically on startup.
+Administrator sessions and credentials are independent of guest sessions.
+
+Guest sharing requires `AUTH_MODE=session`. API-key, external-proxy, and
+disabled authentication modes do not offer the guest-link management controls.
+Anyone who receives or is forwarded the link can use it until it is revoked;
+this first version does not identify or revoke individual friends separately.

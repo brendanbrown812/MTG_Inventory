@@ -637,3 +637,12 @@ def run_migrations(eng) -> None:
                     )
             conn.execute(text("INSERT INTO schema_versions (version) VALUES (13)"))
             conn.commit()
+
+        if 14 not in applied:
+            columns = {
+                row[1] for row in conn.exec_driver_sql("PRAGMA table_info('guest_access')").fetchall()
+            }
+            if "invite_token" not in columns:
+                conn.exec_driver_sql("ALTER TABLE guest_access ADD COLUMN invite_token VARCHAR(128)")
+            conn.execute(text("INSERT INTO schema_versions (version) VALUES (14)"))
+            conn.commit()

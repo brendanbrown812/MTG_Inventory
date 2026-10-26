@@ -25,7 +25,7 @@ from app.logging_setup import configure_logging, get_logger
 from app.models import (
     AuthSession, CardPrinting, Deck, DeckCard, DeckCardAllocation, DeckInventoryAddition,
     EnrichmentStats, InventoryLine, MechanicProfileRecord, OracleCard, RecommendationRun,
-    User,
+    User, GuestAccess, GuestSession,
 )
 from app.embeddings.registry import build_embedding_provider, embedding_provider_is_configured
 from app.evaluation.runner import run_local_quality_evaluation
@@ -124,6 +124,9 @@ from app.auth_service import (
     cookie_name, create_session, csrf_is_valid, find_session, normalize_username,
     session_cookie, token_hash, utcnow, verify_password,
 )
+from app.guest_access import (
+    find_guest_session, guest_cookie, guest_cookie_name, redeem_invite, rotate_invite,
+)
 from app.security import (
     api_key_is_valid, has_unprotected_remote_origin, resolved_auth_mode,
     validate_auth_configuration,
@@ -165,7 +168,8 @@ app.add_middleware(
 )
 
 
-_PUBLIC_API_PATHS = {"/api/health", "/api/auth/status", "/api/auth/login"}
+_PUBLIC_API_PATHS = {"/api/health", "/api/auth/status", "/api/auth/login", "/api/auth/guest"}
+_GUEST_READ_PATH = re.compile(r"/api/guest/(?:collection|decks(?:/[0-9]+)?)\Z")
 _MUTATING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 _login_attempts: dict[str, list[float]] = {}
 _login_attempts_lock = threading.Lock()
@@ -201,19 +205,32 @@ async def require_authentication(request: Request, call_next):
             with SessionLocal() as db:
                 auth_session = find_session(db, session_cookie(request.cookies))
                 if auth_session is None:
-                    return JSONResponse(status_code=401, content={"detail": "Sign in required"})
-                if auth_session.user.role != "admin":
-                    return JSONResponse(status_code=403, content={"detail": "Administrator access required"})
-                if (
-                    request.method in _MUTATING_METHODS
-                    and not csrf_is_valid(auth_session, request.headers.get("X-CSRF-Token"))
-                ):
-                    return JSONResponse(status_code=403, content={"detail": "Invalid CSRF token"})
-                request.state.user_id = auth_session.user.id
-                request.state.username = auth_session.user.username
-                auth_session.last_seen_at = utcnow()
-                db.commit()
-    return await call_next(request)
+                    guest = find_guest_session(db, guest_cookie(request.cookies))
+                    if guest is None:
+                        return JSONResponse(status_code=401, content={"detail": "Sign in required"})
+                    if request.url.path == "/api/auth/logout" and request.method == "POST":
+                        if not csrf_is_valid(guest, request.headers.get("X-CSRF-Token")):
+                            return JSONResponse(status_code=403, content={"detail": "Invalid CSRF token"})
+                    elif request.method != "GET" or not _GUEST_READ_PATH.fullmatch(request.url.path):
+                        return JSONResponse(status_code=403, content={"detail": "Guest access is read-only and limited to collection and decks"})
+                    request.state.guest = True
+                else:
+                    if auth_session.user.role != "admin":
+                        return JSONResponse(status_code=403, content={"detail": "Administrator access required"})
+                    if (
+                        request.method in _MUTATING_METHODS
+                        and not csrf_is_valid(auth_session, request.headers.get("X-CSRF-Token"))
+                    ):
+                        return JSONResponse(status_code=403, content={"detail": "Invalid CSRF token"})
+                    request.state.user_id = auth_session.user.id
+                    request.state.username = auth_session.user.username
+                    auth_session.last_seen_at = utcnow()
+                    db.commit()
+    response = await call_next(request)
+    if request.url.path.startswith(("/api/auth/", "/api/guest/")):
+        response.headers["Cache-Control"] = "private, no-store"
+        response.headers["Referrer-Policy"] = "no-referrer"
+    return response
 
 
 def _norm_bool(val: str | None) -> bool:
@@ -829,6 +846,14 @@ def auth_status(request: Request):
         with SessionLocal() as db:
             setup_required = db.query(User.id).first() is None
             auth_session = find_session(db, session_cookie(request.cookies))
+            if auth_session is None:
+                guest = find_guest_session(db, guest_cookie(request.cookies))
+                if guest:
+                    return {
+                        "mode": mode, "required": True, "authenticated": True,
+                        "setup_required": False, "user": {"username": "Guest", "role": "guest"},
+                        "csrf_token": guest.csrf_token,
+                    }
             return {
                 "mode": mode, "required": True,
                 "authenticated": auth_session is not None,
@@ -901,12 +926,133 @@ def logout(request: Request):
         with SessionLocal() as db:
             db.query(AuthSession).filter(AuthSession.token_hash == token_hash(raw_token)).delete()
             db.commit()
+    raw_guest = guest_cookie(request.cookies)
+    if raw_guest:
+        with SessionLocal() as db:
+            db.query(GuestSession).filter(GuestSession.token_hash == token_hash(raw_guest)).delete()
+            db.commit()
     response = JSONResponse({"authenticated": False})
-    for name in {"spellbinder_session", "__Host-spellbinder_session"}:
+    for name in {"spellbinder_session", "__Host-spellbinder_session", "spellbinder_guest", "__Host-spellbinder_guest"}:
         response.delete_cookie(
             name, path="/", secure=name.startswith("__Host-"), samesite="strict"
         )
     return response
+
+
+def _require_native_admin(request: Request) -> None:
+    if resolved_auth_mode() != "session" or not getattr(request.state, "user_id", None):
+        raise HTTPException(403, detail="Sign in as administrator to manage guest access")
+
+
+@app.get("/api/auth/guest-link")
+def guest_link_status(request: Request, db: Annotated[Session, Depends(get_db)]):
+    _require_native_admin(request)
+    access = db.get(GuestAccess, 1)
+    return {
+        "enabled": bool(access and access.enabled),
+        "created_at": access.created_at if access else None,
+        "recoverable": bool(access and access.enabled and access.invite_token),
+    }
+
+
+@app.get("/api/auth/guest-link/reveal")
+def reveal_guest_link(request: Request, db: Annotated[Session, Depends(get_db)]):
+    _require_native_admin(request)
+    access = db.get(GuestAccess, 1)
+    if not access or not access.enabled:
+        raise HTTPException(404, detail="Guest access is disabled. Generate a guest link first.")
+    if not access.invite_token:
+        raise HTTPException(409, detail="This older link was stored only as a fingerprint. Have someone open the original invite link once, then try again. Existing links and sessions still work.")
+    return {"token": access.invite_token}
+
+
+@app.post("/api/auth/guest-link")
+def generate_guest_link(request: Request, db: Annotated[Session, Depends(get_db)]):
+    _require_native_admin(request)
+    token = rotate_invite(db)
+    db.commit()
+    return {"enabled": True, "token": token}
+
+
+@app.delete("/api/auth/guest-link")
+def disable_guest_link(request: Request, db: Annotated[Session, Depends(get_db)]):
+    _require_native_admin(request)
+    access = db.get(GuestAccess, 1)
+    if access:
+        access.enabled = False
+        access.invite_token = None
+    db.query(GuestSession).delete()
+    db.commit()
+    return {"enabled": False}
+
+
+class _GuestInviteRequest(BaseModel):
+    token: str = Field(min_length=40, max_length=128)
+
+
+@app.post("/api/auth/guest")
+def guest_login(body: _GuestInviteRequest, request: Request, db: Annotated[Session, Depends(get_db)]):
+    if resolved_auth_mode() != "session":
+        raise HTTPException(404, detail="Guest links require native session login")
+    client = request.client.host if request.client else "unknown"
+    rate_key = f"guest:{client}"
+    now = time.monotonic()
+    with _login_attempts_lock:
+        recent = [attempt for attempt in _login_attempts.get(rate_key, []) if now - attempt < 300]
+        _login_attempts[rate_key] = recent
+        if len(recent) >= 10:
+            raise HTTPException(429, detail="Too many invalid guest links. Try again in a few minutes.")
+    new_session = redeem_invite(db, body.token)
+    if new_session is None:
+        with _login_attempts_lock:
+            _login_attempts.setdefault(rate_key, []).append(now)
+        raise HTTPException(401, detail="This guest link is invalid or has been disabled. Ask the owner for a new link.")
+    db.commit()
+    response = JSONResponse({"authenticated": True})
+    response.set_cookie(
+        guest_cookie_name(), new_session.token,
+        max_age=max(0, int((new_session.expires_at - utcnow()).total_seconds())),
+        httponly=True, secure=settings.session_cookie_secure, samesite="strict", path="/",
+    )
+    return response
+
+
+@app.get("/api/guest/collection", response_model=list[InventoryOracleGroupOut])
+def guest_collection(db: Annotated[Session, Depends(get_db)], q: str | None = None):
+    return list_grouped_inventory(db=db, q=q)
+
+
+@app.get("/api/guest/decks", response_model=list[DeckOut])
+def guest_decks(db: Annotated[Session, Depends(get_db)]):
+    return [deck.model_copy(update={"notes": None}) for deck in list_decks(db=db)]
+
+
+@app.get("/api/guest/decks/{deck_id}", response_model=DeckDetailOut)
+def guest_deck(deck_id: int, db: Annotated[Session, Depends(get_db)]):
+    source = get_deck(deck_id=deck_id, db=db)
+    deck = DeckDetailOut.model_validate(source)
+    selected_printing = db.get(CardPrinting, source.commander_scryfall_id) if source.commander_scryfall_id else None
+    commander_oracle_id = source.commander_oracle_id or (selected_printing.oracle_id if selected_printing else None)
+    # Older decks may record the commander on the deck without flagging a row.
+    # Resolve by Oracle identity too: the selected commander may use another print.
+    if not any(card.is_commander for card in deck.cards):
+        candidates = sorted(source.cards, key=lambda card: (card.is_sideboard, card.id))
+        commander = next((card for card in candidates if (
+            commander_oracle_id and card.oracle_id == commander_oracle_id
+        ) or (
+            source.commander_scryfall_id and card.scryfall_id == source.commander_scryfall_id
+        )), None)
+        if commander:
+            deck = deck.model_copy(update={"cards": [
+                card.model_copy(update={"is_commander": True, "is_sideboard": False})
+                if card.id == commander.id else card for card in deck.cards
+            ]})
+    commander_names = [card.card.name for card in deck.cards if card.is_commander and card.card]
+    if not commander_names and commander_oracle_id:
+        oracle = db.get(OracleCard, commander_oracle_id)
+        if oracle:
+            commander_names = [oracle.name]
+    return deck.model_copy(update={"notes": None, "commander_name": " / ".join(commander_names) or None})
 
 
 @app.get("/api/inventory", response_model=list[InventoryLineOut])

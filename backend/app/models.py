@@ -46,6 +46,27 @@ class AuthSession(Base):
     user: Mapped[User] = relationship(back_populates="sessions")
 
 
+class GuestAccess(Base):
+    """One shared invite, retrievable only by the administrator."""
+
+    __tablename__ = "guest_access"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    invite_hash: Mapped[str] = mapped_column(String(64))
+    invite_token: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+
+
+class GuestSession(Base):
+    __tablename__ = "guest_sessions"
+
+    token_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    invite_hash: Mapped[str] = mapped_column(String(64), index=True)
+    csrf_token: Mapped[str] = mapped_column(String(64))
+    expires_at: Mapped[datetime] = mapped_column(DateTime, index=True)
+
+
 class OracleCard(Base):
     """Printing-independent card identity and game mechanics."""
 

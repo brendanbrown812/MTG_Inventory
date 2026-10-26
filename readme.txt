@@ -283,3 +283,37 @@ REMOTE ACCESS SECURITY
   upstream access policy before exposing the application.
 
 ================================================================================
+
+HOW TO RUN ON A MAC (AUTOMATIC SETUP)
+-----------------------------------
+  Double-click start-spellbinder.command in the project root. It opens
+  Terminal, downloads its own Python 3.12, Node.js 22, and dependencies,
+  starts both servers, and opens http://127.0.0.1:5173/ in your browser.
+  Allow several minutes and an internet connection for the first run.
+  No Homebrew, Docker, or manual Python/Node installation is required.
+  The downloaded tools stay in the ignored .local-runtime directory.
+  Later runs reuse them and check for dependency changes.
+
+  Keep the Terminal window open while using the app. Press Control+C in
+  that window to stop both servers. Run the same file to start again.
+
+  If Finder will not open the file, open Terminal (Applications > Utilities),
+  type "bash " (with a space, without quotes), drag start-spellbinder.command
+  into Terminal, and press Return. If macOS explicitly blocks a downloaded
+  file, use System Settings > Privacy & Security > Open Anyway for this
+  file after reviewing it.
+
+  Requires macOS 11 or newer (Apple Silicon or Intel). Installs prebuilt
+  packages; no compiler is required for the current dependencies.
+  If future dependencies require compilation, the launcher shows the
+  command to install Apple's Command Line Tools.
+
+  Your collection is stored in backend/mtg_inventory.db. Copying the code
+  alone from Windows does not transfer that database; restore your existing
+  backup or copy the database with both copies of the app stopped.
+  Existing .env settings are respected. No API key is needed for basic use.
+
+  Running the Mac launcher again automatically stops this project's existing
+  API and frontend and starts fresh, including reloading .env settings.
+  If another app owns either port, the launcher leaves it running and tells
+  you which port and process need attention.
