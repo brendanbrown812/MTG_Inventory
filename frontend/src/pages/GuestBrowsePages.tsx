@@ -1,13 +1,14 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import {
-  fetchGuestCollection, fetchGuestDeck, fetchGuestDecks,
-  type Deck, type DeckCard, type DeckDetail, type InventoryOracleGroup,
+  fetchGuestCollection, fetchGuestDeck, fetchGuestDecks, fetchTags,
+  type Deck, type DeckCard, type DeckDetail, type InventoryOracleGroup, type Tag,
 } from "../api";
 import { GuestPrintingGallery } from "../components/GuestPrintingGallery";
 import { collectionGuestPrintings, deckGuestPrintings } from "../lib/guestPrintings";
 import { cardTypeCategory, compareDeckCards, TYPE_ORDER, TYPE_SECTION_LABELS, type DeckSortMode } from "../lib/deckSorting";
 import { formatOptionLabel } from "../lib/formats";
+import { CardTagEditor, TagChip } from "../components/CardTags";
 
 const inputStyle = "rounded-xl border border-white/10 bg-ink-950/60 px-4 py-2.5 text-sm text-stone-200 outline-none focus:ring-2 focus:ring-ember-400/30";
 
@@ -21,16 +22,33 @@ export function GuestCollectionPage() {
   const [error, setError] = useState("");
   const [query, setQuery] = useState("");
   const [page, setPage] = useState(0);
+  const [tags, setTags] = useState<Tag[]>([]);
+  const [selected, setSelected] = useState<InventoryOracleGroup | null>(null);
+  const [selectedTags, setSelectedTags] = useState<Set<number>>(new Set());
+  const [tagMode, setTagMode] = useState<"any" | "all">("any");
+  const [untaggedOnly, setUntaggedOnly] = useState(false);
+  const [showTags, setShowTags] = useState(() => localStorage.getItem("spellbinder:guest-collection:show-tags") !== "false");
   useEffect(() => {
     let active = true;
-    fetchGuestCollection().then((rows) => { if (active) setCards(rows); })
+    Promise.all([fetchGuestCollection(), fetchTags()]).then(([rows, availableTags]) => { if (active) { setCards(rows); setTags(availableTags); } })
       .catch((e: Error) => { if (active) setError(e.message); })
       .finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
   }, []);
-  const filtered = useMemo(() => cards.filter(({ card }) =>
-    `${card.name} ${card.type_line ?? ""} ${card.mana_cost ?? ""}`.toLowerCase().includes(query.toLowerCase().trim())
-  ).sort((a, b) => a.card.name.localeCompare(b.card.name)), [cards, query]);
+  useEffect(() => { localStorage.setItem("spellbinder:guest-collection:show-tags", String(showTags)); }, [showTags]);
+  const filtered = useMemo(() => cards.filter((group) => {
+    if (!`${group.card.name} ${group.card.type_line ?? ""} ${group.card.mana_cost ?? ""}`.toLowerCase().includes(query.toLowerCase().trim())) return false;
+    if (untaggedOnly && group.tags.length) return false;
+    if (selectedTags.size) {
+      const assigned = new Set(group.tags.map((tag) => tag.id));
+      if (tagMode === "all" ? ![...selectedTags].every((id) => assigned.has(id)) : ![...selectedTags].some((id) => assigned.has(id))) return false;
+    }
+    return true;
+  }).sort((a, b) => a.card.name.localeCompare(b.card.name)), [cards, query, selectedTags, tagMode, untaggedOnly]);
+  function updateCardTags(oracleId: string, nextTags: Tag[]) {
+    setCards((current) => current.map((group) => group.oracle_id === oracleId ? { ...group, tags: nextTags } : group));
+    setSelected((current) => current?.oracle_id === oracleId ? { ...current, tags: nextTags } : current);
+  }
   const pageCount = Math.max(1, Math.ceil(filtered.length / 60));
   return <div className="space-y-6">
     <div><h1 className="font-display text-4xl text-stone-100">Collection</h1>
@@ -39,13 +57,25 @@ export function GuestCollectionPage() {
     <label className="block text-sm text-stone-400">Search cards
       <input value={query} onChange={(event) => { setQuery(event.target.value); setPage(0); }} placeholder="Card name, type, or mana cost…" className={`${inputStyle} mt-2 block w-full sm:max-w-lg`} />
     </label>
+    <div className="rounded-2xl border border-white/10 bg-ink-900/40 p-4">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <label className="flex items-center gap-2 text-sm text-stone-300"><input type="checkbox" checked={showTags} onChange={(event) => setShowTags(event.target.checked)} className="accent-orange-500" /> Show Tags</label>
+        <div className="flex overflow-hidden rounded-lg border border-white/10 text-xs">{(["any", "all"] as const).map((mode) => <button key={mode} onClick={() => setTagMode(mode)} className={`px-3 py-1.5 ${tagMode === mode ? "bg-ember-500/20 text-ember-200" : "text-stone-400"}`}>{mode === "any" ? "Match any" : "Match all"}</button>)}</div>
+      </div>
+      <div className="mt-3 flex flex-wrap gap-2">
+        {tags.map((tag) => <button key={tag.id} onClick={() => { setUntaggedOnly(false); setSelectedTags((current) => { const next = new Set(current); next.has(tag.id) ? next.delete(tag.id) : next.add(tag.id); return next; }); setPage(0); }} className={`rounded-full ${selectedTags.has(tag.id) ? "ring-2 ring-white/50" : "opacity-70"}`}><TagChip tag={tag} /></button>)}
+        <button onClick={() => { setUntaggedOnly((value) => !value); setSelectedTags(new Set()); setPage(0); }} className={`rounded-full border border-white/10 px-2.5 py-1 text-xs ${untaggedOnly ? "bg-stone-200 text-ink-950" : "text-stone-400"}`}>Untagged</button>
+      </div>
+    </div>
     <ErrorMessage message={error} />
     {loading ? <p className="text-stone-400">Loading collection…</p> : <>
       <p className="text-sm text-stone-500">{filtered.length.toLocaleString()} matching cards. Browse the owned prints with the arrows; click any image to enlarge it.</p>
       <div className="grid grid-cols-[repeat(auto-fill,minmax(155px,1fr))] gap-3 sm:grid-cols-[repeat(auto-fill,minmax(175px,1fr))] xl:grid-cols-[repeat(auto-fill,minmax(190px,1fr))]">
         {filtered.slice(page * 60, (page + 1) * 60).map((group) => <article key={group.oracle_id} className="overflow-hidden rounded-xl border border-white/10 bg-ink-900/40">
           <GuestPrintingGallery name={group.card.name} printings={collectionGuestPrintings(group)} />
+          {showTags && group.tags.length > 0 && <div className="flex flex-wrap gap-1 px-3 pb-2">{group.tags.map((tag) => <TagChip key={tag.id} tag={tag} compact />)}</div>}
           <p className="px-3 pb-3 text-xs text-stone-500">{group.total_quantity} total copies · {group.printing_count} {group.printing_count === 1 ? "printing" : "printings"}</p>
+          <button type="button" onClick={() => setSelected(group)} className="mx-3 mb-3 w-[calc(100%-1.5rem)] rounded-lg border border-white/10 px-3 py-1.5 text-xs text-stone-300 hover:border-ember-400/40">Details & tags</button>
         </article>)}
       </div>
       {!filtered.length && <p className="text-stone-400">No cards found.</p>}
@@ -55,6 +85,21 @@ export function GuestCollectionPage() {
         <button disabled={page + 1 >= pageCount} onClick={() => setPage(page + 1)} className={`${inputStyle} disabled:opacity-40`}>Next</button>
       </div>}
     </>}
+    {selected && <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm">
+      <button className="absolute inset-0" aria-label="Close details" onClick={() => setSelected(null)} />
+      <div className="relative w-full max-w-xl rounded-2xl border border-white/10 bg-ink-900 p-6 shadow-card">
+        <button onClick={() => setSelected(null)} className="absolute right-3 top-3 rounded-full bg-black/40 px-2.5 py-1 text-stone-300">×</button>
+        <div className="flex gap-5">
+          {selected.printings[0]?.image_uri_normal && <img src={selected.printings[0].image_uri_normal} alt={selected.card.name} className="hidden w-40 self-start rounded-xl sm:block" />}
+          <div className="min-w-0 flex-1">
+            <h2 className="font-display text-2xl text-stone-100">{selected.card.name}</h2>
+            <p className="mt-1 text-sm text-stone-500">{selected.card.type_line}</p>
+            <p className="mt-2 text-sm text-stone-400">{selected.total_quantity} owned across {selected.printing_count} {selected.printing_count === 1 ? "printing" : "printings"}</p>
+            <div className="mt-5"><CardTagEditor oracleId={selected.oracle_id} assigned={selected.tags} available={tags} onChange={(next) => updateCardTags(selected.oracle_id, next)} /></div>
+          </div>
+        </div>
+      </div>
+    </div>}
   </div>;
 }
 

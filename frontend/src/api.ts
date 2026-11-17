@@ -138,9 +138,59 @@ export type InventoryOracleGroup = {
   total_quantity: number;
   printing_count: number;
   inventory_line_count: number;
+  tags: Tag[];
   card: Card;
   printings: InventoryPrinting[];
 };
+
+export const TAG_COLORS = ["slate", "red", "orange", "amber", "green", "teal", "blue", "violet", "pink"] as const;
+export type TagColor = typeof TAG_COLORS[number];
+export type Tag = { id: number; name: string; color: TagColor };
+
+export async function fetchTags(): Promise<Tag[]> {
+  const r = await fetch(`${base}/api/tags`);
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+
+export async function createTag(name: string, color: TagColor): Promise<Tag> {
+  const r = await fetch(`${base}/api/tags`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name, color }),
+  });
+  const payload = await r.json().catch(() => null) as { detail?: string } | Tag | null;
+  if (!r.ok) throw new Error((payload as { detail?: string } | null)?.detail ?? "Could not create tag");
+  return payload as Tag;
+}
+
+export async function deleteTag(tagId: number): Promise<void> {
+  const r = await fetch(`${base}/api/tags/${tagId}`, { method: "DELETE" });
+  if (!r.ok) throw new Error(await r.text());
+}
+
+export async function addCardTag(oracleId: string, tagId: number): Promise<Tag[]> {
+  const r = await fetch(`${base}/api/cards/${encodeURIComponent(oracleId)}/tags/${tagId}`, { method: "POST" });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+
+export async function removeCardTag(oracleId: string, tagId: number): Promise<Tag[]> {
+  const r = await fetch(`${base}/api/cards/${encodeURIComponent(oracleId)}/tags/${tagId}`, { method: "DELETE" });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+
+export async function bulkRemoveCardTags(oracleIds: string[], tagIds: number[]): Promise<{ removed_assignments: number }> {
+  const r = await fetch(`${base}/api/card-tags/bulk-remove`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ oracle_ids: oracleIds, tag_ids: tagIds }),
+  });
+  const payload = await r.json().catch(() => null) as { removed_assignments?: number; detail?: string } | null;
+  if (!r.ok) throw new Error(payload?.detail ?? "Could not remove tags");
+  return payload as { removed_assignments: number };
+}
 
 export type InventorySetMember = {
   set_code: string;
@@ -421,6 +471,8 @@ export type CollectionImportResult = {
   mechanic_profiles: number;
   embeddings: number;
   card_preferences: number;
+  tags: number;
+  card_tags: number;
 };
 
 export async function importCollectionBackup(file: File): Promise<CollectionImportResult> {

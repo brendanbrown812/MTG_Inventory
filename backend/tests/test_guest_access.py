@@ -134,6 +134,12 @@ def test_guests_cannot_call_any_administrator_route_or_write(client):
             path = route.path
             if not path.startswith("/api/") or path.startswith("/api/guest/") or path in public:
                 continue
+            if path == "/api/tags" and route.methods == {"GET"}:
+                continue
+            if path == "/api/cards/{oracle_id}/tags/{tag_id}":
+                continue
+            if path == "/api/card-tags/bulk-remove":
+                continue
             path = re.sub(r"\{[^}]+\}", "1", path)
             for method in route.methods:
                 response = guest.request(method, path, headers=csrf)
@@ -143,6 +149,36 @@ def test_guests_cannot_call_any_administrator_route_or_write(client):
                 assert guest.request(method, path, headers=csrf).status_code == 403
         assert guest.get("/api/guest/decks/1/export").status_code == 403
         assert guest.get("/api/guest/anything-new").status_code == 403
+
+
+def test_guests_can_assign_existing_tags_but_cannot_manage_definitions(client):
+    headers = admin_login(client)
+    seed_deck()
+    created = client.post(
+        "/api/tags", json={"name": "Trade", "color": "amber"}, headers=headers,
+    )
+    assert created.status_code == 201
+    tag = created.json()
+    token = generate(client, headers)
+
+    with TestClient(app) as guest:
+        assert guest.post("/api/auth/guest", json={"token": token}).status_code == 200
+        csrf = {"X-CSRF-Token": guest.get("/api/auth/status").json()["csrf_token"]}
+        assert guest.get("/api/tags").json() == [tag]
+        assert guest.post(f"/api/cards/oracle-one/tags/{tag['id']}").status_code == 403
+        assigned = guest.post(f"/api/cards/oracle-one/tags/{tag['id']}", headers=csrf)
+        assert assigned.status_code == 200
+        assert guest.get("/api/guest/collection").json()[0]["tags"] == [tag]
+        assert guest.post("/api/tags", json={"name": "Nope", "color": "red"}, headers=csrf).status_code == 403
+        assert guest.delete(f"/api/tags/{tag['id']}", headers=csrf).status_code == 403
+        assert guest.post("/api/card-tags/bulk-remove", json={
+            "oracle_ids": ["oracle-one"], "tag_ids": [tag["id"]],
+        }).status_code == 403
+        bulk = guest.post("/api/card-tags/bulk-remove", json={
+            "oracle_ids": ["oracle-one"], "tag_ids": [tag["id"]],
+        }, headers=csrf)
+        assert bulk.status_code == 200
+        assert bulk.json() == {"removed_assignments": 1}
 
 
 def test_rotation_and_disable_revoke_old_links_and_all_sessions(client):

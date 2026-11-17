@@ -93,6 +93,39 @@ class OracleCard(Base):
     semantic_embeddings: Mapped[list["OracleEmbeddingRecord"]] = relationship(
         back_populates="oracle", cascade="all, delete-orphan"
     )
+    tags: Mapped[list["Tag"]] = relationship(
+        secondary="card_tags", back_populates="cards", viewonly=True
+    )
+
+
+class Tag(Base):
+    """An administrator-defined label that can be assigned to Oracle cards."""
+
+    __tablename__ = "tags"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(80), unique=True, index=True)
+    color: Mapped[str] = mapped_column(String(20))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+
+    cards: Mapped[list[OracleCard]] = relationship(
+        secondary="card_tags", back_populates="tags", viewonly=True
+    )
+
+
+class CardTag(Base):
+    """Many-to-many assignment between an Oracle card and a tag."""
+
+    __tablename__ = "card_tags"
+
+    oracle_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("oracle_cards.oracle_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    tag_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("tags.id", ondelete="CASCADE"), primary_key=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
 
 
 class CardPrinting(Base):

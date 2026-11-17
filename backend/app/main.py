@@ -23,9 +23,9 @@ from app.config import settings
 from app.database import Base, SessionLocal, engine, get_db, run_migrations
 from app.logging_setup import configure_logging, get_logger
 from app.models import (
-    AuthSession, CardPrinting, Deck, DeckCard, DeckCardAllocation, DeckInventoryAddition,
+    AuthSession, CardPrinting, CardTag, Deck, DeckCard, DeckCardAllocation, DeckInventoryAddition,
     EnrichmentStats, InventoryLine, MechanicProfileRecord, OracleCard, RecommendationRun,
-    User, GuestAccess, GuestSession,
+    User, GuestAccess, GuestSession, Tag,
 )
 from app.embeddings.registry import build_embedding_provider, embedding_provider_is_configured
 from app.evaluation.runner import run_local_quality_evaluation
@@ -44,6 +44,7 @@ from app.schemas import (
     BulkSetPrintingMatchOut,
     BulkSetPrintingRequest,
     BulkSetPrintingResultOut,
+    BulkCardTagRemove,
     CardResolveMatch,
     CardResolveOut,
     ClearInventoryResult,
@@ -75,6 +76,8 @@ from app.schemas import (
     ProxyReplacementCardOut,
     ProxyReplacementDeckOut,
     ProxyReplacementScanOut,
+    TagCreate,
+    TagOut,
 )
 from app.services.matcher import match_new_cards
 from app.services.collection_transfer import (
@@ -170,6 +173,7 @@ app.add_middleware(
 
 _PUBLIC_API_PATHS = {"/api/health", "/api/auth/status", "/api/auth/login", "/api/auth/guest"}
 _GUEST_READ_PATH = re.compile(r"/api/guest/(?:collection|decks(?:/[0-9]+)?)\Z")
+_GUEST_TAG_MUTATION_PATH = re.compile(r"/api/cards/[^/]+/tags/[0-9]+\Z")
 _MUTATING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 _login_attempts: dict[str, list[float]] = {}
 _login_attempts_lock = threading.Lock()
@@ -209,6 +213,14 @@ async def require_authentication(request: Request, call_next):
                     if guest is None:
                         return JSONResponse(status_code=401, content={"detail": "Sign in required"})
                     if request.url.path == "/api/auth/logout" and request.method == "POST":
+                        if not csrf_is_valid(guest, request.headers.get("X-CSRF-Token")):
+                            return JSONResponse(status_code=403, content={"detail": "Invalid CSRF token"})
+                    elif request.method == "GET" and request.url.path == "/api/tags":
+                        pass
+                    elif request.method in {"POST", "DELETE"} and (
+                        _GUEST_TAG_MUTATION_PATH.fullmatch(request.url.path)
+                        or (request.method == "POST" and request.url.path == "/api/card-tags/bulk-remove")
+                    ):
                         if not csrf_is_valid(guest, request.headers.get("X-CSRF-Token")):
                             return JSONResponse(status_code=403, content={"detail": "Invalid CSRF token"})
                     elif request.method != "GET" or not _GUEST_READ_PATH.fullmatch(request.url.path):
@@ -944,6 +956,104 @@ def _require_native_admin(request: Request) -> None:
         raise HTTPException(403, detail="Sign in as administrator to manage guest access")
 
 
+def _require_tag_admin(request: Request) -> None:
+    if getattr(request.state, "guest", False):
+        raise HTTPException(403, detail="Only an administrator can manage tag definitions")
+
+
+@app.get("/api/tags", response_model=list[TagOut])
+def list_tags(db: Annotated[Session, Depends(get_db)]):
+    return db.query(Tag).order_by(func.lower(Tag.name), Tag.id).all()
+
+
+@app.post("/api/tags", response_model=TagOut, status_code=201)
+def create_tag(
+    body: TagCreate,
+    request: Request,
+    db: Annotated[Session, Depends(get_db)],
+):
+    _require_tag_admin(request)
+    name = " ".join(body.name.split())
+    if not name:
+        raise HTTPException(422, detail="Tag name cannot be blank")
+    existing = db.query(Tag).filter(func.lower(Tag.name) == name.casefold()).first()
+    if existing:
+        raise HTTPException(409, detail="A tag with that name already exists")
+    tag = Tag(name=name, color=body.color)
+    db.add(tag)
+    db.commit()
+    db.refresh(tag)
+    return tag
+
+
+@app.delete("/api/tags/{tag_id}")
+def delete_tag(
+    tag_id: int,
+    request: Request,
+    db: Annotated[Session, Depends(get_db)],
+):
+    _require_tag_admin(request)
+    tag = db.get(Tag, tag_id)
+    if tag is None:
+        raise HTTPException(404, detail="Tag not found")
+    db.delete(tag)
+    db.commit()
+    return {"deleted": True}
+
+
+@app.post("/api/cards/{oracle_id}/tags/{tag_id}", response_model=list[TagOut])
+def add_card_tag(
+    oracle_id: str,
+    tag_id: int,
+    db: Annotated[Session, Depends(get_db)],
+):
+    if db.get(OracleCard, oracle_id) is None:
+        raise HTTPException(404, detail="Card not found")
+    if db.get(Tag, tag_id) is None:
+        raise HTTPException(404, detail="Tag not found")
+    if db.get(CardTag, (oracle_id, tag_id)) is None:
+        db.add(CardTag(oracle_id=oracle_id, tag_id=tag_id))
+        db.commit()
+    return (
+        db.query(Tag).join(CardTag, CardTag.tag_id == Tag.id)
+        .filter(CardTag.oracle_id == oracle_id)
+        .order_by(func.lower(Tag.name), Tag.id).all()
+    )
+
+
+@app.delete("/api/cards/{oracle_id}/tags/{tag_id}", response_model=list[TagOut])
+def remove_card_tag(
+    oracle_id: str,
+    tag_id: int,
+    db: Annotated[Session, Depends(get_db)],
+):
+    assignment = db.get(CardTag, (oracle_id, tag_id))
+    if assignment is not None:
+        db.delete(assignment)
+        db.commit()
+    return (
+        db.query(Tag).join(CardTag, CardTag.tag_id == Tag.id)
+        .filter(CardTag.oracle_id == oracle_id)
+        .order_by(func.lower(Tag.name), Tag.id).all()
+    )
+
+
+@app.post("/api/card-tags/bulk-remove")
+def bulk_remove_card_tags(
+    body: BulkCardTagRemove,
+    db: Annotated[Session, Depends(get_db)],
+):
+    oracle_ids = list(dict.fromkeys(body.oracle_ids))
+    tag_ids = list(dict.fromkeys(body.tag_ids))
+    removed = (
+        db.query(CardTag)
+        .filter(CardTag.oracle_id.in_(oracle_ids), CardTag.tag_id.in_(tag_ids))
+        .delete(synchronize_session=False)
+    )
+    db.commit()
+    return {"removed_assignments": removed}
+
+
 @app.get("/api/auth/guest-link")
 def guest_link_status(request: Request, db: Annotated[Session, Depends(get_db)]):
     _require_native_admin(request)
@@ -1290,6 +1400,18 @@ def list_grouped_inventory(
             printing_group["nonfoil_quantity"] += line.quantity
         printing_group["lines"].append(line)
 
+    tag_rows = (
+        db.query(CardTag.oracle_id, Tag)
+        .join(Tag, Tag.id == CardTag.tag_id)
+        .filter(CardTag.oracle_id.in_(groups.keys()))
+        .order_by(func.lower(Tag.name), Tag.id)
+        .all()
+        if groups else []
+    )
+    tags_by_oracle: dict[str, list[Tag]] = {}
+    for oracle_id, tag in tag_rows:
+        tags_by_oracle.setdefault(oracle_id, []).append(tag)
+
     output = []
     for group in groups.values():
         printings = list(group.pop("printings").values())
@@ -1302,6 +1424,7 @@ def list_grouped_inventory(
             **group,
             "printing_count": len(printings),
             "printings": printings,
+            "tags": tags_by_oracle.get(group["oracle_id"], []),
         })
     output.sort(key=lambda group: (
         group["card"].name.casefold(),

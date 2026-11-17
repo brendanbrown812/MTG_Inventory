@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 
 from app.models import (
     CardPrinting,
+    CardTag,
     DeckCard,
     DeckCardAllocation,
     InventoryLine,
@@ -19,6 +20,7 @@ from app.models import (
     OracleCard,
     OracleEmbeddingRecord,
     RecommendationCardPreference,
+    Tag,
 )
 from app.schemas import CollectionBackup, CollectionImportResult
 
@@ -63,6 +65,15 @@ def build_collection_backup(db: Session) -> CollectionBackup:
         db.query(RecommendationCardPreference)
         .filter(RecommendationCardPreference.oracle_id.in_(oracle_ids))
         .order_by(RecommendationCardPreference.oracle_id)
+        .all()
+        if oracle_ids else []
+    )
+    tags = db.query(Tag).order_by(func.lower(Tag.name), Tag.id).all()
+    card_tags = (
+        db.query(CardTag, Tag.name)
+        .join(Tag, Tag.id == CardTag.tag_id)
+        .filter(CardTag.oracle_id.in_(oracle_ids))
+        .order_by(CardTag.oracle_id, func.lower(Tag.name))
         .all()
         if oracle_ids else []
     )
@@ -142,6 +153,9 @@ def build_collection_backup(db: Session) -> CollectionBackup:
             "rejected_count": preference.rejected_count,
             "updated_at": preference.updated_at,
         } for preference in preferences],
+        "tags": [{"name": tag.name, "color": tag.color} for tag in tags],
+        "card_tags": [{"oracle_id": assignment.oracle_id, "tag_name": tag_name}
+                      for assignment, tag_name in card_tags],
     })
 
 
@@ -260,6 +274,11 @@ def restore_collection_backup(db: Session, backup: CollectionBackup) -> Collecti
         raise HTTPException(400, detail="An embedding references a card missing from the backup")
     if any(preference.oracle_id not in oracle_ids for preference in backup.card_preferences):
         raise HTTPException(400, detail="A preference references a card missing from the backup")
+    tag_names = {tag.name.casefold() for tag in backup.tags}
+    if any(assignment.oracle_id not in oracle_ids for assignment in backup.card_tags):
+        raise HTTPException(400, detail="A tag assignment references a card missing from the backup")
+    if any(assignment.tag_name.casefold() not in tag_names for assignment in backup.card_tags):
+        raise HTTPException(400, detail="A tag assignment references a tag missing from the backup")
     _validate_grabbed_cards_against_backup(db, backup)
 
     try:
@@ -327,6 +346,28 @@ def restore_collection_backup(db: Session, backup: CollectionBackup) -> Collecti
         for source in backup.card_preferences:
             db.add(RecommendationCardPreference(**source.model_dump()))
 
+        existing_tags = {tag.name.casefold(): tag for tag in db.query(Tag).all()}
+        restored_tags: dict[str, Tag] = {}
+        for source in backup.tags:
+            key = source.name.casefold()
+            tag = existing_tags.get(key)
+            if tag is None:
+                tag = Tag(name=source.name, color=source.color)
+                db.add(tag)
+            else:
+                tag.color = source.color
+            restored_tags[key] = tag
+        db.flush()
+        if oracle_ids:
+            db.query(CardTag).filter(CardTag.oracle_id.in_(oracle_ids)).delete(
+                synchronize_session=False
+            )
+        for source in backup.card_tags:
+            db.add(CardTag(
+                oracle_id=source.oracle_id,
+                tag_id=restored_tags[source.tag_name.casefold()].id,
+            ))
+
         db.commit()
     except HTTPException:
         db.rollback()
@@ -342,4 +383,6 @@ def restore_collection_backup(db: Session, backup: CollectionBackup) -> Collecti
         mechanic_profiles=len(backup.mechanic_profiles),
         embeddings=len(backup.embeddings),
         card_preferences=len(backup.card_preferences),
+        tags=len(backup.tags),
+        card_tags=len(backup.card_tags),
     )

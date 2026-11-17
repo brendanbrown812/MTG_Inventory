@@ -646,3 +646,31 @@ def run_migrations(eng) -> None:
                 conn.exec_driver_sql("ALTER TABLE guest_access ADD COLUMN invite_token VARCHAR(128)")
             conn.execute(text("INSERT INTO schema_versions (version) VALUES (14)"))
             conn.commit()
+
+        if 15 not in applied:
+            # Fresh databases already have these through create_all. Existing
+            # databases receive the additive tag tables without rebuilding any
+            # collection or deck data.
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS tags (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name VARCHAR(80) NOT NULL UNIQUE,
+                    color VARCHAR(20) NOT NULL,
+                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+            """))
+            conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_tags_name ON tags (name)"
+            ))
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS card_tags (
+                    oracle_id VARCHAR(36) NOT NULL,
+                    tag_id INTEGER NOT NULL,
+                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (oracle_id, tag_id),
+                    FOREIGN KEY(oracle_id) REFERENCES oracle_cards (oracle_id) ON DELETE CASCADE,
+                    FOREIGN KEY(tag_id) REFERENCES tags (id) ON DELETE CASCADE
+                )
+            """))
+            conn.execute(text("INSERT INTO schema_versions (version) VALUES (15)"))
+            conn.commit()

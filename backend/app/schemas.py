@@ -137,6 +137,16 @@ class CollectionCardPreferenceBackup(BaseModel):
     updated_at: datetime
 
 
+class CollectionTagBackup(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    color: str = Field(min_length=1, max_length=20)
+
+
+class CollectionCardTagBackup(BaseModel):
+    oracle_id: str = Field(min_length=36, max_length=36)
+    tag_name: str = Field(min_length=1, max_length=80)
+
+
 class CollectionBackup(BaseModel):
     format: Literal["spellbinder.collection"]
     version: Literal[1]
@@ -147,6 +157,8 @@ class CollectionBackup(BaseModel):
     mechanic_profiles: list[CollectionMechanicProfileBackup] = Field(max_length=500_000)
     embeddings: list[CollectionEmbeddingBackup] = Field(max_length=500_000)
     card_preferences: list[CollectionCardPreferenceBackup] = Field(max_length=100_000)
+    tags: list[CollectionTagBackup] = Field(default_factory=list, max_length=10_000)
+    card_tags: list[CollectionCardTagBackup] = Field(default_factory=list, max_length=500_000)
 
 
 class CollectionImportResult(BaseModel):
@@ -156,6 +168,8 @@ class CollectionImportResult(BaseModel):
     mechanic_profiles: int
     embeddings: int
     card_preferences: int
+    tags: int
+    card_tags: int
 
 
 class DeckBackupMetadata(BaseModel):
@@ -222,6 +236,28 @@ class InventoryPrintingOut(BaseModel):
     lines: list[InventoryLineOut]
 
 
+class TagOut(BaseModel):
+    id: int
+    name: str
+    color: str
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class TagCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    color: Literal[
+        "slate", "red", "orange", "amber", "green", "teal", "blue", "violet", "pink"
+    ]
+
+
+class BulkCardTagRemove(BaseModel):
+    oracle_ids: list[Annotated[str, Field(min_length=1, max_length=36)]] = Field(
+        min_length=1, max_length=10_000
+    )
+    tag_ids: list[Annotated[int, Field(ge=1)]] = Field(min_length=1, max_length=10_000)
+
+
 class InventoryOracleGroupOut(BaseModel):
     oracle_id: str
     total_quantity: int
@@ -229,6 +265,7 @@ class InventoryOracleGroupOut(BaseModel):
     inventory_line_count: int
     card: CardOut
     printings: list[InventoryPrintingOut]
+    tags: list[TagOut] = Field(default_factory=list)
 
 class DeckCardIn(BaseModel):
     scryfall_id: str = Field(min_length=36, max_length=36)

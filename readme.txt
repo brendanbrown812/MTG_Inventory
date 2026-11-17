@@ -253,6 +253,12 @@ CARD DATA MODEL
 
        docs\DATA_MODEL.md
 
+  Collection cards can also carry administrator-defined colored tags shared
+  across all printings of the same Oracle card. Tag filtering, guest assignment,
+  permissions, and backup behavior are documented at:
+
+       docs\TAGS.md
+
 
 DETERMINISTIC COMMANDER ANALYSIS
 --------------------------------

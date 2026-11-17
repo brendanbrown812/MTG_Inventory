@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 from app.database import SessionLocal
 from app.models import (
     CardPrinting,
+    CardTag,
     Deck,
     DeckCard,
     DeckCardAllocation,
@@ -19,6 +20,7 @@ from app.models import (
     OracleCard,
     OracleEmbeddingRecord,
     RecommendationCardPreference,
+    Tag,
 )
 
 
@@ -93,6 +95,10 @@ def _seed_portable_collection() -> None:
             accepted_count=2,
             rejected_count=1,
         ))
+        tag = Tag(name="Combo Piece", color="violet")
+        db.add(tag)
+        db.flush()
+        db.add(CardTag(oracle_id=ORACLE_ID, tag_id=tag.id))
         db.commit()
 
 
@@ -113,6 +119,8 @@ def test_collection_backup_round_trip_is_complete_and_repeat_safe(
     assert payload["mechanic_profiles"][0]["provider"] == "openai"
     assert payload["embeddings"][0]["dimensions"] == 2
     assert payload["card_preferences"][0]["accepted_count"] == 2
+    assert payload["tags"] == [{"name": "Combo Piece", "color": "violet"}]
+    assert payload["card_tags"] == [{"oracle_id": ORACLE_ID, "tag_name": "Combo Piece"}]
 
     with SessionLocal() as db:
         db.query(InventoryLine).update({InventoryLine.quantity: 99})
@@ -138,6 +146,8 @@ def test_collection_backup_round_trip_is_complete_and_repeat_safe(
             "mechanic_profiles": 1,
             "embeddings": 1,
             "card_preferences": 1,
+            "tags": 1,
+            "card_tags": 1,
         }
 
     with SessionLocal() as db:
@@ -150,6 +160,8 @@ def test_collection_backup_round_trip_is_complete_and_repeat_safe(
         assert embedding.vector == struct.pack("<2f", 0.25, -0.5)
         preference = db.query(RecommendationCardPreference).one()
         assert (preference.accepted_count, preference.rejected_count) == (2, 1)
+        assert db.query(Tag).one().name == "Combo Piece"
+        assert db.query(CardTag).one().oracle_id == ORACLE_ID
 
 
 def test_available_collection_export_is_moxfield_compatible_and_excludes_deck_demand(

@@ -1415,3 +1415,51 @@ def test_request_limits_are_enforced(client: TestClient) -> None:
         },
     )
     assert response.status_code == 422
+
+
+def test_card_tags_apply_to_oracle_identity_and_support_definition_management(
+    client: TestClient,
+) -> None:
+    _add_cached_card()
+    with SessionLocal() as db:
+        first = db.get(CardPrinting, SCRYFALL_ID)
+        db.add(CardPrinting(
+            scryfall_id=SECOND_PRINTING_ID,
+            oracle_id=first.oracle_id,
+            set_code="two",
+            collector_number="2",
+            language="en",
+        ))
+        db.add_all([
+            InventoryLine(scryfall_id=SCRYFALL_ID, quantity=1, foil=False, language="en"),
+            InventoryLine(scryfall_id=SECOND_PRINTING_ID, quantity=1, foil=False, language="en"),
+        ])
+        db.commit()
+        oracle_id = first.oracle_id
+
+    created = client.post("/api/tags", json={"name": "  Combo   Piece ", "color": "violet"})
+    assert created.status_code == 201, created.text
+    tag = created.json()
+    assert tag["name"] == "Combo Piece"
+    assert client.post("/api/tags", json={"name": "combo piece", "color": "blue"}).status_code == 409
+
+    assigned = client.post(f"/api/cards/{oracle_id}/tags/{tag['id']}")
+    assert assigned.status_code == 200
+    assert assigned.json() == [tag]
+    groups = client.get("/api/inventory/grouped").json()
+    assert len(groups) == 1
+    assert groups[0]["printing_count"] == 2
+    assert groups[0]["tags"] == [tag]
+
+    bulk = client.post("/api/card-tags/bulk-remove", json={
+        "oracle_ids": [oracle_id],
+        "tag_ids": [tag["id"]],
+    })
+    assert bulk.status_code == 200
+    assert bulk.json() == {"removed_assignments": 1}
+    assert client.get("/api/inventory/grouped").json()[0]["tags"] == []
+
+    assert client.delete(f"/api/cards/{oracle_id}/tags/{tag['id']}").json() == []
+    assert client.get("/api/inventory/grouped").json()[0]["tags"] == []
+    assert client.delete(f"/api/tags/{tag['id']}").status_code == 200
+    assert client.get("/api/tags").json() == []

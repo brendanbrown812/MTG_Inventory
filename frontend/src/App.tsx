@@ -19,6 +19,7 @@ import InventoryPage from "./pages/InventoryPage";
 import CardsBySetPage from "./pages/CardsBySetPage";
 import GuestSharingPage from "./pages/GuestSharingPage";
 import { GuestCollectionPage, GuestDecksPage, GuestDeckDetailPage } from "./pages/GuestBrowsePages";
+import TagsPage from "./pages/TagsPage";
 
 // A fragment never reaches the web server. Remove it before making API requests
 // or loading card images, and exchange it once even under React StrictMode.
@@ -30,6 +31,7 @@ const nav = [
   { to: "/", label: "Collection" },
   { to: "/import", label: "Import" },
   { to: "/cards-by-set", label: "Cards by Set" },
+  { to: "/tags", label: "Tags" },
   { to: "/decks", label: "Decks" },
   { to: "/assembly", label: "Assembly" },
   { to: "/deckbuilding", label: "Deckbuilding" },
@@ -38,7 +40,7 @@ const nav = [
 
 function AppShell({ status, onLogout }: { status: AuthStatus; onLogout: () => void }) {
   const guest = status.user?.role === "guest";
-  const navigation = guest ? nav.filter((item) => ["/", "/decks"].includes(item.to))
+  const navigation = guest ? nav.filter((item) => ["/", "/tags", "/decks"].includes(item.to))
     : status.mode === "session" && status.user?.role === "admin" ? [...nav, { to: "/sharing", label: "Guest access" }] : nav;
   return (
     <div className="min-h-screen bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-ink-800 via-ink-950 to-ink-950">
@@ -94,6 +96,7 @@ function AppShell({ status, onLogout }: { status: AuthStatus; onLogout: () => vo
         {guest ? <Routes>
           <Route path="/" element={<GuestCollectionPage />} />
           <Route path="/decks" element={<GuestDecksPage />} />
+          <Route path="/tags" element={<TagsPage guest />} />
           <Route path="/decks/:id" element={<GuestDeckDetailPage />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes> :
@@ -101,6 +104,7 @@ function AppShell({ status, onLogout }: { status: AuthStatus; onLogout: () => vo
           <Route path="/" element={<InventoryPage />} />
           <Route path="/import" element={<ImportPage />} />
           <Route path="/cards-by-set" element={<CardsBySetPage />} />
+          <Route path="/tags" element={<TagsPage />} />
           <Route path="/decks" element={<DecksPage />} />
           <Route path="/decks/:id" element={<DeckDetailPage />} />
           <Route path="/assembly" element={<DeckAssemblyPage />} />

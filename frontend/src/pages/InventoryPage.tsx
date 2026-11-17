@@ -4,22 +4,36 @@ import {
   clearInventory,
   changeInventoryLinePrinting,
   changeInventoryPrinting,
+  createTag,
   deleteInventoryLine,
-    downloadAvailableCollection,
+  deleteTag,
+  downloadAvailableCollection,
   downloadCollectionBackup,
   fetchCardLocations,
   fetchCardMatches,
   fetchGroupedInventory,
+  fetchTags,
+  TAG_COLORS,
   updateInventoryLineQuantity,
   type CardLocationSummary,
   type DeckMatch,
   type InventoryOracleGroup,
   type InventoryLine,
   type InventoryPrinting,
+  type Tag,
+  type TagColor,
 } from "../api";
 import { PrintingCarousel } from "../components/PrintingCarousel";
 import { PrintChangePicker } from "../components/PrintChangePicker";
 import { AddInventoryCardModal } from "../components/AddInventoryCardModal";
+import { CardTagEditor, TagChip } from "../components/CardTags";
+import {
+  COLLECTION_PRINTING_SELECTION_KEY,
+  collectionSelectedPrinting,
+  compareCollectionCards,
+  readCollectionPrintingSelections,
+  type CollectionSortMode,
+} from "../lib/collectionSorting";
 
 const CMC_VALUES = ["0", "1", "2", "3", "4", "5", "6+"] as const;
 
@@ -37,23 +51,11 @@ const TYPES = [
   "Enchantment", "Planeswalker", "Land", "Battle",
 ] as const;
 
-const PRINTING_SELECTION_KEY = "spellbinder:collection:selected-printings";
+const SHOW_TAGS_KEY = "spellbinder:collection:show-tags";
 
 type PrintChangeTarget =
   | { kind: "printing"; sourceScryfallId: string }
   | { kind: "line"; sourceScryfallId: string; line: InventoryLine };
-
-function readPrintingSelections(): Record<string, string> {
-  try {
-    const value = JSON.parse(localStorage.getItem(PRINTING_SELECTION_KEY) ?? "{}");
-    if (!value || typeof value !== "object" || Array.isArray(value)) return {};
-    return Object.fromEntries(
-      Object.entries(value).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
-    );
-  } catch {
-    return {};
-  }
-}
 
 function FilterChip({
   label,
@@ -80,7 +82,7 @@ function FilterChip({
   );
 }
 
-function toggleSet(prev: Set<string>, value: string): Set<string> {
+function toggleSet<T>(prev: Set<T>, value: T): Set<T> {
   const next = new Set(prev);
   if (next.has(value)) next.delete(value);
   else next.add(value);
@@ -90,7 +92,7 @@ function toggleSet(prev: Set<string>, value: string): Set<string> {
 export default function InventoryPage() {
   const [q, setQ] = useState("");
   const [debouncedQ, setDebouncedQ] = useState("");
-  const [sort, setSort] = useState("name");
+  const [sort, setSort] = useState<CollectionSortMode>("name");
   const [groups, setGroups] = useState<InventoryOracleGroup[]>([]);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
@@ -105,11 +107,20 @@ export default function InventoryPage() {
   const [colorFilter, setColorFilter] = useState<Set<string>>(new Set());
   const [colorMode, setColorMode] = useState<"any" | "exact">("any");
   const [typeFilter, setTypeFilter] = useState<Set<string>>(new Set());
+  const [tagFilter, setTagFilter] = useState<Set<number>>(new Set());
+  const [tagMode, setTagMode] = useState<"any" | "all">("any");
+  const [untaggedOnly, setUntaggedOnly] = useState(false);
+  const [tags, setTags] = useState<Tag[]>([]);
+  const [showTags, setShowTags] = useState(() => localStorage.getItem(SHOW_TAGS_KEY) !== "false");
+  const [newTagName, setNewTagName] = useState("");
+  const [newTagColor, setNewTagColor] = useState<TagColor>("violet");
+  const [tagAdminError, setTagAdminError] = useState("");
+  const [tagAdminBusy, setTagAdminBusy] = useState(false);
 
   // Card detail modal state
   const [selected, setSelected] = useState<InventoryOracleGroup | null>(null);
   const [selectedPrintingByOracle, setSelectedPrintingByOracle] = useState<Record<string, string>>(
-    readPrintingSelections,
+    readCollectionPrintingSelections,
   );
   const [locations, setLocations] = useState<CardLocationSummary | null>(null);
   const [membershipLoading, setMembershipLoading] = useState(false);
@@ -141,6 +152,14 @@ export default function InventoryPage() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  useEffect(() => {
+    void fetchTags().then(setTags).catch((e: Error) => setErr(e.message));
+  }, []);
+
+  useEffect(() => {
+    localStorage.setItem(SHOW_TAGS_KEY, String(showTags));
+  }, [showTags]);
 
   // Client-side filter applied on top of the server-sorted/searched rows
   const filteredGroups = groups.filter((group) => {
@@ -174,36 +193,67 @@ export default function InventoryPage() {
       if (![...typeFilter].some((t) => tl.includes(t.toLowerCase()))) return false;
     }
 
+    if (untaggedOnly && group.tags.length > 0) return false;
+    if (tagFilter.size > 0) {
+      const assigned = new Set(group.tags.map((tag) => tag.id));
+      const matches = tagMode === "all"
+        ? [...tagFilter].every((tagId) => assigned.has(tagId))
+        : [...tagFilter].some((tagId) => assigned.has(tagId));
+      if (!matches) return false;
+    }
+
     return true;
   });
 
-  const activeFilterCount = cmcFilter.size + colorFilter.size + typeFilter.size;
+  const activeFilterCount = cmcFilter.size + colorFilter.size + typeFilter.size + tagFilter.size + (untaggedOnly ? 1 : 0);
 
   function clearFilters() {
     setCmcFilter(new Set());
     setColorFilter(new Set());
     setColorMode("any");
     setTypeFilter(new Set());
+    setTagFilter(new Set());
+    setTagMode("any");
+    setUntaggedOnly(false);
+  }
+
+  function updateCardTags(oracleId: string, nextTags: Tag[]) {
+    setGroups((current) => current.map((group) => group.oracle_id === oracleId ? { ...group, tags: nextTags } : group));
+    setSelected((current) => current?.oracle_id === oracleId ? { ...current, tags: nextTags } : current);
+  }
+
+  async function submitNewTag(event: React.FormEvent) {
+    event.preventDefault();
+    if (!newTagName.trim()) return;
+    setTagAdminBusy(true); setTagAdminError("");
+    try {
+      const created = await createTag(newTagName, newTagColor);
+      setTags((current) => [...current, created].sort((a, b) => a.name.localeCompare(b.name)));
+      setNewTagName("");
+    } catch (e) { setTagAdminError(e instanceof Error ? e.message : "Could not create tag"); }
+    finally { setTagAdminBusy(false); }
+  }
+
+  async function removeTagDefinition(tag: Tag) {
+    if (!confirm(`Delete the tag “${tag.name}” from every card?`)) return;
+    setTagAdminBusy(true); setTagAdminError("");
+    try {
+      await deleteTag(tag.id);
+      setTags((current) => current.filter((item) => item.id !== tag.id));
+      setTagFilter((current) => { const next = new Set(current); next.delete(tag.id); return next; });
+      setGroups((current) => current.map((group) => ({ ...group, tags: group.tags.filter((item) => item.id !== tag.id) })));
+      setSelected((current) => current ? { ...current, tags: current.tags.filter((item) => item.id !== tag.id) } : null);
+    } catch (e) { setTagAdminError(e instanceof Error ? e.message : "Could not delete tag"); }
+    finally { setTagAdminBusy(false); }
   }
 
   function selectedPrinting(group: InventoryOracleGroup): InventoryPrinting | undefined {
-    const savedId = selectedPrintingByOracle[group.oracle_id];
-    return group.printings.find((printing) => printing.scryfall_id === savedId) ?? group.printings[0];
+    return collectionSelectedPrinting(group, selectedPrintingByOracle);
   }
 
-  const visibleGroups = [...filteredGroups].sort((left, right) => {
-    if (sort === "quantity") {
-      return right.total_quantity - left.total_quantity || left.card.name.localeCompare(right.card.name);
-    }
-    if (sort === "set") {
-      const leftPrinting = selectedPrinting(left);
-      const rightPrinting = selectedPrinting(right);
-      const leftKey = `${leftPrinting?.set_code ?? ""}:${leftPrinting?.collector_number ?? ""}`;
-      const rightKey = `${rightPrinting?.set_code ?? ""}:${rightPrinting?.collector_number ?? ""}`;
-      return leftKey.localeCompare(rightKey) || left.card.name.localeCompare(right.card.name);
-    }
-    return left.card.name.localeCompare(right.card.name);
-  });
+  const visibleGroups = [...filteredGroups].sort((left, right) =>
+    compareCollectionCards(left, right, sort, selectedPrintingByOracle)
+  );
 
   async function openCard(group: InventoryOracleGroup) {
     setSelected(group);
@@ -223,7 +273,7 @@ export default function InventoryPage() {
   async function choosePrinting(group: InventoryOracleGroup, printing: InventoryPrinting) {
     setSelectedPrintingByOracle((previous) => {
       const next = { ...previous, [group.oracle_id]: printing.scryfall_id };
-      localStorage.setItem(PRINTING_SELECTION_KEY, JSON.stringify(next));
+      localStorage.setItem(COLLECTION_PRINTING_SELECTION_KEY, JSON.stringify(next));
       return next;
     });
     setPrintChangeTarget(null);
@@ -277,7 +327,7 @@ export default function InventoryPage() {
       : targetScryfallId;
     setSelectedPrintingByOracle((previous) => {
       const next = { ...previous, [selected.oracle_id]: nextSelectedId };
-      localStorage.setItem(PRINTING_SELECTION_KEY, JSON.stringify(next));
+      localStorage.setItem(COLLECTION_PRINTING_SELECTION_KEY, JSON.stringify(next));
       return next;
     });
     setSelected(refreshed);
@@ -439,7 +489,7 @@ export default function InventoryPage() {
           />
           <select
             value={sort}
-            onChange={(e) => setSort(e.target.value)}
+            onChange={(e) => setSort(e.target.value as CollectionSortMode)}
             className="rounded-xl border border-white/10 bg-ink-900/80 px-4 py-2.5 text-sm text-stone-200 outline-none focus:ring-2 focus:ring-arcane-400/40"
           >
             <option value="name">Sort: Name</option>
@@ -458,6 +508,10 @@ export default function InventoryPage() {
               </span>
             )}
           </button>
+          <label className="flex items-center gap-2 rounded-xl border border-white/10 bg-ink-900/80 px-4 py-2.5 text-sm text-stone-300">
+            <input type="checkbox" checked={showTags} onChange={(event) => setShowTags(event.target.checked)} className="accent-orange-500" />
+            Show Tags
+          </label>
           <button
             type="button"
             disabled={clearing}
@@ -527,35 +581,46 @@ export default function InventoryPage() {
             const c = group.card;
             const printing = selectedPrinting(group);
             return (
-              <button
+              <div
                 key={group.oracle_id}
-                type="button"
-                onClick={() => void openCard(group)}
-                className="group relative aspect-[5/7] w-full overflow-hidden rounded-xl ring-1 ring-white/10 transition duration-150 hover:scale-[1.03] hover:ring-ember-400/50 focus:outline-none focus-visible:ring-2 focus-visible:ring-ember-400"
+                className="min-w-0 self-start rounded-2xl border border-white/10 bg-ink-900/55 p-2 shadow-card"
               >
-                {printing?.image_uri_normal ? (
-                  <img
-                    src={printing.image_uri_normal}
-                    alt={c.name}
-                    className="h-full w-full object-cover"
-                    loading="lazy"
-                  />
-                ) : (
-                  <div className="flex h-full w-full items-center justify-center bg-ink-800 p-2">
-                    <span className="text-center text-[11px] leading-tight text-stone-400">
-                      {c.name}
-                    </span>
+                <button
+                  type="button"
+                  onClick={() => void openCard(group)}
+                  className="group relative aspect-[5/7] w-full overflow-hidden rounded-xl ring-1 ring-white/10 transition duration-150 hover:scale-[1.03] hover:ring-ember-400/50 focus:outline-none focus-visible:ring-2 focus-visible:ring-ember-400"
+                >
+                  {printing?.image_uri_normal ? (
+                    <img
+                      src={printing.image_uri_normal}
+                      alt={c.name}
+                      className="h-full w-full object-cover"
+                      loading="lazy"
+                    />
+                  ) : (
+                    <div className="flex h-full w-full items-center justify-center bg-ink-800 p-2">
+                      <span className="text-center text-[11px] leading-tight text-stone-400">
+                        {c.name}
+                      </span>
+                    </div>
+                  )}
+                  <div className="absolute bottom-1.5 right-1.5 rounded-full bg-black/75 px-2 py-0.5 font-mono text-xs font-semibold text-stone-200 ring-1 ring-white/10 backdrop-blur-sm">
+                    ×{group.total_quantity}
+                  </div>
+                  {group.printing_count > 1 && (
+                    <div className="absolute bottom-1.5 left-1.5 rounded-full bg-black/75 px-2 py-0.5 text-[10px] font-semibold text-stone-300 ring-1 ring-white/10 backdrop-blur-sm">
+                      {group.printing_count} prints
+                    </div>
+                  )}
+                </button>
+                {showTags && group.tags.length > 0 && (
+                  <div className="mt-2 min-w-0 border-t border-white/10 px-0.5 pt-2">
+                    <div className="flex flex-wrap gap-1">
+                      {group.tags.map((tag) => <TagChip key={tag.id} tag={tag} />)}
+                    </div>
                   </div>
                 )}
-                <div className="absolute bottom-1.5 right-1.5 rounded-full bg-black/75 px-2 py-0.5 font-mono text-xs font-semibold text-stone-200 ring-1 ring-white/10 backdrop-blur-sm">
-                  ×{group.total_quantity}
-                </div>
-                {group.printing_count > 1 && (
-                  <div className="absolute bottom-1.5 left-1.5 rounded-full bg-black/75 px-2 py-0.5 text-[10px] font-semibold text-stone-300 ring-1 ring-white/10 backdrop-blur-sm">
-                    {group.printing_count} prints
-                  </div>
-                )}
-              </button>
+              </div>
             );
           })}
         </div>
@@ -657,6 +722,36 @@ export default function InventoryPage() {
                   ))}
                 </div>
               </div>
+
+              {/* Tags */}
+              <div>
+                <div className="flex items-center justify-between">
+                  <p className="text-xs font-medium uppercase tracking-wider text-stone-500">Tags</p>
+                  <div className="flex overflow-hidden rounded-lg border border-white/10 text-xs">
+                    {(["any", "all"] as const).map((mode) => <button key={mode} type="button" onClick={() => setTagMode(mode)} className={`px-2.5 py-1 ${tagMode === mode ? "bg-ember-500/20 text-ember-200" : "text-stone-400"}`}>{mode === "any" ? "Any" : "All"}</button>)}
+                  </div>
+                </div>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  {tags.map((tag) => <FilterChip key={tag.id} label={tag.name} checked={tagFilter.has(tag.id)} onChange={() => { setUntaggedOnly(false); setTagFilter((current) => toggleSet(current, tag.id)); }} />)}
+                  <FilterChip label="Untagged" checked={untaggedOnly} onChange={() => { setUntaggedOnly((value) => !value); setTagFilter(new Set()); }} />
+                </div>
+                {!tags.length && <p className="mt-2 text-xs text-stone-600">Create a tag below to start filtering.</p>}
+              </div>
+
+              <div className="border-t border-white/10 pt-5">
+                <p className="text-xs font-medium uppercase tracking-wider text-stone-500">Manage tags</p>
+                <form onSubmit={(event) => void submitNewTag(event)} className="mt-3 flex gap-2">
+                  <input value={newTagName} onChange={(event) => setNewTagName(event.target.value)} maxLength={80} placeholder="New tag name" className="min-w-0 flex-1 rounded-lg border border-white/10 bg-ink-950 px-3 py-2 text-sm text-stone-200 outline-none" />
+                  <select aria-label="Tag color" value={newTagColor} onChange={(event) => setNewTagColor(event.target.value as TagColor)} className="rounded-lg border border-white/10 bg-ink-950 px-2 text-sm text-stone-200">
+                    {TAG_COLORS.map((color) => <option key={color} value={color}>{color.charAt(0).toUpperCase() + color.slice(1)}</option>)}
+                  </select>
+                  <button disabled={tagAdminBusy || !newTagName.trim()} className="rounded-lg border border-emerald-400/30 px-3 text-sm text-emerald-200 disabled:opacity-40">Add</button>
+                </form>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  {tags.map((tag) => <TagChip key={tag.id} tag={tag} onRemove={() => void removeTagDefinition(tag)} />)}
+                </div>
+                {tagAdminError && <p className="mt-2 text-xs text-red-300">{tagAdminError}</p>}
+              </div>
             </div>
 
             <button
@@ -743,6 +838,8 @@ export default function InventoryPage() {
                     <div className="text-[10px] uppercase tracking-wider text-stone-500">owned</div>
                   </div>
                 </div>
+
+                <CardTagEditor oracleId={selected.oracle_id} assigned={selected.tags} available={tags} onChange={(next) => updateCardTags(selected.oracle_id, next)} />
 
                 {/* Action buttons */}
                 <div>
