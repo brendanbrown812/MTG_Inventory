@@ -72,7 +72,9 @@ export function GuestCollectionPage() {
       <p className="text-sm text-stone-500">{filtered.length.toLocaleString()} matching cards. Browse the owned prints with the arrows; click any image to enlarge it.</p>
       <div className="grid grid-cols-[repeat(auto-fill,minmax(155px,1fr))] gap-3 sm:grid-cols-[repeat(auto-fill,minmax(175px,1fr))] xl:grid-cols-[repeat(auto-fill,minmax(190px,1fr))]">
         {filtered.slice(page * 60, (page + 1) * 60).map((group) => <article key={group.oracle_id} className="overflow-hidden rounded-xl border border-white/10 bg-ink-900/40">
-          <GuestPrintingGallery name={group.card.name} printings={collectionGuestPrintings(group)} />
+          <GuestPrintingGallery name={group.card.name} printings={collectionGuestPrintings(group)}>
+            <CardTagEditor oracleId={group.oracle_id} assigned={group.tags} available={tags} onChange={(next) => updateCardTags(group.oracle_id, next)} />
+          </GuestPrintingGallery>
           {showTags && group.tags.length > 0 && <div className="flex flex-wrap gap-1 px-3 pb-2">{group.tags.map((tag) => <TagChip key={tag.id} tag={tag} compact />)}</div>}
           <p className="px-3 pb-3 text-xs text-stone-500">{group.total_quantity} total copies · {group.printing_count} {group.printing_count === 1 ? "printing" : "printings"}</p>
           <button type="button" onClick={() => setSelected(group)} className="mx-3 mb-3 w-[calc(100%-1.5rem)] rounded-lg border border-white/10 px-3 py-1.5 text-xs text-stone-300 hover:border-ember-400/40">Details & tags</button>

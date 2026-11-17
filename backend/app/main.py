@@ -217,10 +217,7 @@ async def require_authentication(request: Request, call_next):
                             return JSONResponse(status_code=403, content={"detail": "Invalid CSRF token"})
                     elif request.method == "GET" and request.url.path == "/api/tags":
                         pass
-                    elif request.method in {"POST", "DELETE"} and (
-                        _GUEST_TAG_MUTATION_PATH.fullmatch(request.url.path)
-                        or (request.method == "POST" and request.url.path == "/api/card-tags/bulk-remove")
-                    ):
+                    elif request.method in {"POST", "DELETE"} and _GUEST_TAG_MUTATION_PATH.fullmatch(request.url.path):
                         if not csrf_is_valid(guest, request.headers.get("X-CSRF-Token")):
                             return JSONResponse(status_code=403, content={"detail": "Invalid CSRF token"})
                     elif request.method != "GET" or not _GUEST_READ_PATH.fullmatch(request.url.path):
@@ -1041,8 +1038,10 @@ def remove_card_tag(
 @app.post("/api/card-tags/bulk-remove")
 def bulk_remove_card_tags(
     body: BulkCardTagRemove,
+    request: Request,
     db: Annotated[Session, Depends(get_db)],
 ):
+    _require_tag_admin(request)
     oracle_ids = list(dict.fromkeys(body.oracle_ids))
     tag_ids = list(dict.fromkeys(body.tag_ids))
     removed = (

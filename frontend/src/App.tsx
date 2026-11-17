@@ -79,7 +79,7 @@ function AppShell({ status, onLogout }: { status: AuthStatus; onLogout: () => vo
             </nav>
             {status.user && (
               <div className="flex items-center gap-2 text-xs text-stone-400">
-                <span className="text-stone-400">{guest ? "Guest · Read only" : status.user.username}</span>
+                <span className="text-stone-400">{guest ? "Guest" : status.user.username}</span>
                 <button
                   type="button"
                   onClick={onLogout}

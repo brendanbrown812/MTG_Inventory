@@ -70,7 +70,7 @@ export default function TagsPage({ guest = false }: { guest?: boolean }) {
   }
 
   async function untagSelected() {
-    if (!selectedCards.size || !selectedTags.size) return;
+    if (guest || !selectedCards.size || !selectedTags.size) return;
     setSaving(true);
     setError("");
     try {
@@ -97,7 +97,7 @@ export default function TagsPage({ guest = false }: { guest?: boolean }) {
       <div>
         <h1 className="font-display text-4xl font-semibold text-stone-100">Tags</h1>
         <p className="mt-2 max-w-2xl text-stone-400">
-          Choose one or more tags, select cards as you collect them, then remove the displayed tags in one step.
+          {guest ? "Choose one or more tags and select cards as you collect them." : "Choose one or more tags, select cards as you collect them, then remove the displayed tags in one step."}
         </p>
       </div>
       <select value={sort} onChange={(event) => setSort(event.target.value as CollectionSortMode)} className="rounded-xl border border-white/10 bg-ink-900/80 px-4 py-2.5 text-sm text-stone-200 outline-none">
@@ -138,7 +138,7 @@ export default function TagsPage({ guest = false }: { guest?: boolean }) {
           {visibleCards.length > 0 && <button type="button" onClick={() => setSelectedCards(allVisibleSelected ? new Set() : new Set(visibleCards.map((card) => card.oracle_id)))} className="rounded-xl border border-white/10 px-3 py-2 text-sm text-stone-400 transition hover:border-white/25 hover:text-stone-200">
             {allVisibleSelected ? "Clear selection" : "Select all"}
           </button>}
-          {selectedCards.size > 0 && <button type="button" disabled={saving} onClick={() => void untagSelected()} className="rounded-xl border border-red-400/30 bg-red-500/10 px-4 py-2.5 text-sm font-medium text-red-200 hover:bg-red-500/20 disabled:opacity-50">
+          {!guest && selectedCards.size > 0 && <button type="button" disabled={saving} onClick={() => void untagSelected()} className="rounded-xl border border-red-400/30 bg-red-500/10 px-4 py-2.5 text-sm font-medium text-red-200 hover:bg-red-500/20 disabled:opacity-50">
             {saving ? "Removing tags…" : `Untag Selected (${selectedCards.size})`}
           </button>}
         </div>

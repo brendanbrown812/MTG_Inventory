@@ -177,8 +177,8 @@ def test_guests_can_assign_existing_tags_but_cannot_manage_definitions(client):
         bulk = guest.post("/api/card-tags/bulk-remove", json={
             "oracle_ids": ["oracle-one"], "tag_ids": [tag["id"]],
         }, headers=csrf)
-        assert bulk.status_code == 200
-        assert bulk.json() == {"removed_assignments": 1}
+        assert bulk.status_code == 403
+        assert guest.get("/api/guest/collection").json()[0]["tags"] == [tag]
 
 
 def test_rotation_and_disable_revoke_old_links_and_all_sessions(client):

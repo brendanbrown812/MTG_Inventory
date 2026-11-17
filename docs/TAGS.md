@@ -5,7 +5,9 @@ identities. A tag therefore applies to every owned printing of the same card.
 
 Administrators create colored tag definitions from the Collection filter panel.
 Authenticated administrators and shared-link guests can add or remove existing
-tags from a card's detail view. Guests cannot create or delete tag definitions.
+tags from a card's detail view, including the viewer opened by clicking a guest
+collection card image. Guests cannot create or delete tag definitions or bulk
+remove tags.
 All tag mutations made through native sessions require the session CSRF token.
 
 The Collection filter supports matching any selected tag, matching all selected
@@ -23,3 +25,4 @@ uses OR matching when more than one tag is checked, presents cards with the same
 Name, Quantity, and Set/number sorting as Collection, and lets a user check off
 physical cards while gathering them. **Untag Selected** atomically removes all
 currently selected tags from every checked card; unrelated tags remain assigned.
+This bulk action is available only to administrators; guests can still select cards.
