@@ -23,6 +23,14 @@ rebuilding collection or deck tables.
 The authenticated **Tags** page is available to administrators and guests. It
 uses OR matching when more than one tag is checked, presents cards with the same
 Name, Quantity, and Set/number sorting as Collection, and lets a user check off
-physical cards while gathering them. **Untag Selected** atomically removes all
-currently selected tags from every checked card; unrelated tags remain assigned.
+physical cards while gathering them. Guests use it as a read-only checklist.
+
+For administrators, selecting a card creates a physical-removal plan. The owner
+must specify quantities from exact inventory lines, and cards with more than one
+owned printing explicitly show every printing, treatment, condition, and
+language. **Remove from Collection** atomically reduces those exact lines and
+clears the selected workflow tags only from cards included in the plan. Cards
+that were not selected remain unchanged and tagged. Existing deck-allocation
+protections still prevent removing committed physical copies. **Untag Selected**
+remains available when only the workflow labels need correction.
 This bulk action is available only to administrators; guests can still select cards.

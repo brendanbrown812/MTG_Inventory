@@ -192,6 +192,27 @@ export async function bulkRemoveCardTags(oracleIds: string[], tagIds: number[]):
   return payload as { removed_assignments: number };
 }
 
+export type InventoryRemovalEntry = { oracle_id: string; line_id: number; quantity: number };
+export type BulkInventoryRemovalResult = {
+  removed_cards: number;
+  removed_copies: number;
+  removed_tag_assignments: number;
+};
+
+export async function bulkRemoveInventory(
+  removals: InventoryRemovalEntry[],
+  tagIds: number[],
+): Promise<BulkInventoryRemovalResult> {
+  const r = await fetch(`${base}/api/inventory/bulk-remove`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ removals, tag_ids: tagIds }),
+  });
+  const payload = await r.json().catch(() => null) as BulkInventoryRemovalResult | { detail?: string } | null;
+  if (!r.ok) throw new Error((payload as { detail?: string } | null)?.detail ?? "Could not remove inventory copies");
+  return payload as BulkInventoryRemovalResult;
+}
+
 export type InventorySetMember = {
   set_code: string;
   set_name: string | null;

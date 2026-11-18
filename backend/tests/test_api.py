@@ -6,7 +6,7 @@ from fastapi.testclient import TestClient
 
 from app.config import settings
 from app.database import SessionLocal
-from app.models import CardPrinting, DeckInventoryAddition, InventoryLine, OracleCard
+from app.models import CardPrinting, CardTag, DeckInventoryAddition, InventoryLine, OracleCard, Tag
 
 
 SCRYFALL_ID = "00000000-0000-4000-8000-000000000001"
@@ -1463,3 +1463,118 @@ def test_card_tags_apply_to_oracle_identity_and_support_definition_management(
     assert client.get("/api/inventory/grouped").json()[0]["tags"] == []
     assert client.delete(f"/api/tags/{tag['id']}").status_code == 200
     assert client.get("/api/tags").json() == []
+
+
+def test_bulk_inventory_removal_uses_exact_lines_and_only_clears_selected_tags(
+    client: TestClient,
+) -> None:
+    _add_cached_card()
+    with SessionLocal() as db:
+        first = db.get(CardPrinting, SCRYFALL_ID)
+        second = CardPrinting(
+            scryfall_id=SECOND_PRINTING_ID,
+            oracle_id=first.oracle_id,
+            set_code="two",
+            collector_number="2",
+            language="en",
+        )
+        trade = Tag(name="Trade In", color="red")
+        cube = Tag(name="Cube", color="violet")
+        untouched = OracleCard(
+            oracle_id="00000000-0000-4000-8000-000000000009",
+            name="Untouched Trade Card",
+        )
+        db.add_all([second, trade, cube, untouched])
+        db.flush()
+        untouched_printing = CardPrinting(
+            scryfall_id="00000000-0000-4000-8000-000000000010",
+            oracle_id=untouched.oracle_id,
+            set_code="keep",
+            collector_number="1",
+            language="en",
+        )
+        first_line = InventoryLine(
+            scryfall_id=SCRYFALL_ID, quantity=3, foil=False, language="en",
+        )
+        second_line = InventoryLine(
+            scryfall_id=SECOND_PRINTING_ID, quantity=2, foil=True, language="en",
+        )
+        db.add(untouched_printing)
+        db.flush()
+        untouched_line = InventoryLine(
+            scryfall_id=untouched_printing.scryfall_id,
+            quantity=4,
+            foil=False,
+            language="en",
+        )
+        db.add_all([first_line, second_line, untouched_line])
+        db.flush()
+        db.add_all([
+            CardTag(oracle_id=first.oracle_id, tag_id=trade.id),
+            CardTag(oracle_id=first.oracle_id, tag_id=cube.id),
+            CardTag(oracle_id=untouched.oracle_id, tag_id=trade.id),
+        ])
+        db.commit()
+        oracle_id = first.oracle_id
+        first_line_id = first_line.id
+        second_line_id = second_line.id
+        trade_id = trade.id
+        cube_id = cube.id
+        untouched_oracle_id = untouched.oracle_id
+        untouched_line_id = untouched_line.id
+
+    response = client.post("/api/inventory/bulk-remove", json={
+        "removals": [
+            {"oracle_id": oracle_id, "line_id": first_line_id, "quantity": 2},
+            {"oracle_id": oracle_id, "line_id": second_line_id, "quantity": 1},
+        ],
+        "tag_ids": [trade_id],
+    })
+    assert response.status_code == 200, response.text
+    assert response.json() == {
+        "removed_cards": 1,
+        "removed_copies": 3,
+        "removed_tag_assignments": 1,
+    }
+
+    with SessionLocal() as db:
+        assert db.get(InventoryLine, first_line_id).quantity == 1
+        assert db.get(InventoryLine, second_line_id).quantity == 1
+        assert db.get(InventoryLine, untouched_line_id).quantity == 4
+        assignments = db.query(CardTag).filter(CardTag.oracle_id == oracle_id).all()
+        assert [(assignment.oracle_id, assignment.tag_id) for assignment in assignments] == [
+            (oracle_id, cube_id),
+        ]
+        assert db.get(CardTag, (untouched_oracle_id, trade_id)) is not None
+
+    groups = client.get("/api/inventory/grouped").json()
+    group = next(group for group in groups if group["oracle_id"] == oracle_id)
+    assert group["total_quantity"] == 2
+    assert [tag["name"] for tag in group["tags"]] == ["Cube"]
+    untouched_group = next(
+        group for group in groups if group["oracle_id"] == untouched_oracle_id
+    )
+    assert untouched_group["total_quantity"] == 4
+    assert [tag["name"] for tag in untouched_group["tags"]] == ["Trade In"]
+
+
+def test_bulk_inventory_removal_rejects_stale_quantity_without_partial_changes(
+    client: TestClient,
+) -> None:
+    _add_cached_card()
+    with SessionLocal() as db:
+        line = InventoryLine(
+            scryfall_id=SCRYFALL_ID, quantity=2, foil=False, language="en",
+        )
+        db.add(line)
+        db.commit()
+        line_id = line.id
+        oracle_id = db.get(CardPrinting, SCRYFALL_ID).oracle_id
+
+    response = client.post("/api/inventory/bulk-remove", json={
+        "removals": [{"oracle_id": oracle_id, "line_id": line_id, "quantity": 3}],
+        "tag_ids": [1],
+    })
+    assert response.status_code == 409
+    with SessionLocal() as db:
+        assert db.get(InventoryLine, line_id).quantity == 2

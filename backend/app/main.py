@@ -45,6 +45,7 @@ from app.schemas import (
     BulkSetPrintingRequest,
     BulkSetPrintingResultOut,
     BulkCardTagRemove,
+    BulkInventoryRemoval,
     CardResolveMatch,
     CardResolveOut,
     ClearInventoryResult,
@@ -1728,6 +1729,75 @@ def delete_inventory_line(line_id: int, db: Annotated[Session, Depends(get_db)])
     db.commit()
     _log.info("Deleted inventory line id=%s scryfall_id=%s", line_id, row.scryfall_id)
     return {"ok": True}
+
+
+@app.post("/api/inventory/bulk-remove")
+def bulk_remove_inventory(
+    body: BulkInventoryRemoval,
+    db: Annotated[Session, Depends(get_db)],
+):
+    """Atomically remove exact physical copies and complete selected tag tasks."""
+    line_ids = [entry.line_id for entry in body.removals]
+    if len(line_ids) != len(set(line_ids)):
+        raise HTTPException(422, detail="Each inventory line may appear only once")
+
+    prepared: list[tuple[InventoryLine, int, str]] = []
+    for entry in body.removals:
+        row = db.get(InventoryLine, entry.line_id)
+        if row is None:
+            raise HTTPException(404, detail=f"Inventory line {entry.line_id} was not found")
+        printing = db.get(CardPrinting, row.scryfall_id)
+        if printing is None or printing.oracle_id != entry.oracle_id:
+            raise HTTPException(409, detail="An inventory line no longer belongs to the selected card")
+        if entry.quantity > row.quantity:
+            raise HTTPException(
+                409,
+                detail=(
+                    f"Cannot remove {entry.quantity} copies from inventory line "
+                    f"{entry.line_id}; only {row.quantity} remain"
+                ),
+            )
+        prepared.append((row, entry.quantity, entry.oracle_id))
+
+    try:
+        removed_copies = 0
+        affected_oracles: set[str] = set()
+        for row, quantity, oracle_id in prepared:
+            _validate_inventory_quantity_reduction(db, row, row.quantity - quantity)
+            if quantity == row.quantity:
+                db.delete(row)
+            else:
+                row.quantity -= quantity
+            db.flush()
+            removed_copies += quantity
+            affected_oracles.add(oracle_id)
+
+        tag_ids = list(dict.fromkeys(body.tag_ids))
+        removed_tags = (
+            db.query(CardTag)
+            .filter(
+                CardTag.oracle_id.in_(affected_oracles),
+                CardTag.tag_id.in_(tag_ids),
+            )
+            .delete(synchronize_session=False)
+        )
+        db.commit()
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception:
+        db.rollback()
+        raise
+
+    _log.info(
+        "Bulk inventory removal cards=%s copies=%s tag_assignments=%s",
+        len(affected_oracles), removed_copies, removed_tags,
+    )
+    return {
+        "removed_cards": len(affected_oracles),
+        "removed_copies": removed_copies,
+        "removed_tag_assignments": removed_tags,
+    }
 
 
 @app.post("/api/inventory/clear", response_model=ClearInventoryResult)

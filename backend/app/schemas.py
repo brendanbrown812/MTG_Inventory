@@ -258,6 +258,17 @@ class BulkCardTagRemove(BaseModel):
     tag_ids: list[Annotated[int, Field(ge=1)]] = Field(min_length=1, max_length=10_000)
 
 
+class InventoryRemovalEntry(BaseModel):
+    oracle_id: Annotated[str, Field(min_length=1, max_length=36)]
+    line_id: Annotated[int, Field(ge=1)]
+    quantity: Annotated[int, Field(ge=1, le=999_999)]
+
+
+class BulkInventoryRemoval(BaseModel):
+    removals: list[InventoryRemovalEntry] = Field(min_length=1, max_length=10_000)
+    tag_ids: list[Annotated[int, Field(ge=1)]] = Field(min_length=1, max_length=10_000)
+
+
 class InventoryOracleGroupOut(BaseModel):
     oracle_id: str
     total_quantity: int
